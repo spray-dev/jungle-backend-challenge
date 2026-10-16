@@ -4,6 +4,7 @@ import { Migrator } from "@mikro-orm/migrations";
 import { WalletEntity } from "./persistence/entities/wallet.entity.js";
 import { WalletLedgerEntryEntity } from "./persistence/entities/wallet-ledger-entry.entity.js";
 import { WagerTransactionEntity } from "./persistence/entities/wager-transaction.entity.js";
+import { InboxMessageEntity } from "./persistence/entities/inbox-message.entity.js";
 
 export default defineConfig({
     host: "localhost",
@@ -16,8 +17,9 @@ export default defineConfig({
         WalletEntity,
         WalletLedgerEntryEntity,
         WagerTransactionEntity,
+        InboxMessageEntity,
     ],
-    
+
     extensions: [Migrator],
 
     migrations: {

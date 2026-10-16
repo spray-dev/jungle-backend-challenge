@@ -57,9 +57,9 @@ export class ProcessBetService {
                     const expectedStatus = bet.status;
                     const failureCode = wallet.playerId !== bet.playerId ? FailureCode.PlayerMismatch
                         : wallet.currency !== bet.money.currency ? FailureCode.CurrencyMismatch
-                        : bet.money.isZero() || bet.money.isNegative() ? FailureCode.InvalidAmount
-                        : wallet.balance.isLessThan(bet.money) ? FailureCode.InsufficientFunds
-                        : undefined;
+                            : bet.money.isZero() || bet.money.isNegative() ? FailureCode.InvalidAmount
+                                : wallet.balance.isLessThan(bet.money) ? FailureCode.InsufficientFunds
+                                    : undefined;
 
                     if (failureCode !== undefined) {
                         bet.reject(failureCode, wallet.balance);
@@ -68,17 +68,51 @@ export class ProcessBetService {
                     }
 
                     const movement = wallet.debit(bet.money);
-                    if (movement === null) throw new Error("Positive BET must produce a movement");
-                    await wallets.update(wallet, expectedVersion);
+
+                    if (movement === null) {
+                        throw new Error(
+                            "Positive BET must produce a movement",
+                        );
+                    }
+
                     const at = new Date();
-                    await ledger.insert(WalletLedgerEntry.create({
-                        id: crypto.randomUUID(), walletId: wallet.id, transactionId: bet.id,
-                        direction: movement.direction, amount: movement.money,
-                        balanceBefore: movement.balanceBefore, balanceAfter: movement.balanceAfter,
-                        createdAt: at,
-                    }));
-                    bet.markProcessed(undefined, at, wallet.balance);
-                    await wagers.update(bet, expectedStatus);
+
+                    bet.markProcessed(
+                        undefined,
+                        at,
+                        wallet.balance,
+                    );
+
+                    /*
+                     * Claim otimista da própria operação financeira.
+                     *
+                     * Se outra execução da mesma BET já venceu,
+                     * esse update afeta 0 linhas e lança
+                     * ConcurrencyConflictError antes de qualquer
+                     * alteração persistida na wallet ou no ledger.
+                     */
+                    await wagers.update(
+                        bet,
+                        expectedStatus,
+                    );
+
+                    await wallets.update(
+                        wallet,
+                        expectedVersion,
+                    );
+
+                    await ledger.insert(
+                        WalletLedgerEntry.create({
+                            id: crypto.randomUUID(),
+                            walletId: wallet.id,
+                            transactionId: bet.id,
+                            direction: movement.direction,
+                            amount: movement.money,
+                            balanceBefore: movement.balanceBefore,
+                            balanceAfter: movement.balanceAfter,
+                            createdAt: at,
+                        }),
+                    );
                     return bet;
                 }, { clear: true });
             } catch (error) {
