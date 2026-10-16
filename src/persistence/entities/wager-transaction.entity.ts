@@ -26,6 +26,8 @@ export interface WagerTransactionRow {
 
     createdAt: Date;
     processedAt?: Date;
+    observedBalance?: string;
+    observedCurrency?: string;
 }
 
 export const WagerTransactionEntity =
@@ -34,6 +36,8 @@ export const WagerTransactionEntity =
         tableName: "wager_transactions",
 
         properties: {
+            observedBalance: { type: "decimal", precision: 18, scale: 2, fieldName: "observed_balance", nullable: true },
+            observedCurrency: { type: "string", length: 3, fieldName: "observed_currency", nullable: true },
             id: {
                 type: "uuid",
                 primary: true,

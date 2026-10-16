@@ -168,6 +168,40 @@
           ],
           "mappedType": "enum"
         },
+        "observed_balance": {
+          "name": "observed_balance",
+          "type": "numeric(18,2)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": 18,
+          "scale": 2,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "decimal"
+        },
+        "observed_currency": {
+          "name": "observed_currency",
+          "type": "varchar(3)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 3,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "string"
+        },
         "payload_hash": {
           "name": "payload_hash",
           "type": "varchar(255)",
@@ -364,6 +398,12 @@
       ],
       "checks": [
         {
+          "name": "wager_observed_balance_valid",
+          "expression": "((observed_balance IS NULL) AND (observed_currency IS NULL)) OR ((observed_balance IS NOT NULL) AND (observed_currency IS NOT NULL) AND (observed_balance >= 0) AND (observed_currency ~ '^[A-Z]{3}$'::text))",
+          "definition": "CHECK ((((observed_balance IS NULL) AND (observed_currency IS NULL)) OR ((observed_balance IS NOT NULL) AND (observed_currency IS NOT NULL) AND (observed_balance >= (0)::numeric) AND ((observed_currency)::text ~ '^[A-Z]{3}$'::text))))",
+          "columnName": "observed_balance"
+        },
+        {
           "name": "wager_transactions_amount_nonnegative",
           "expression": "amount >= 0",
           "definition": "CHECK ((amount >= (0)::numeric))",
@@ -556,7 +596,7 @@
           "autoincrement": false,
           "primary": false,
           "nullable": false,
-          "unique": false,
+          "unique": true,
           "length": null,
           "precision": null,
           "scale": null,
@@ -568,6 +608,17 @@
         }
       },
       "indexes": [
+        {
+          "columnNames": [
+            "wallet_id",
+            "transaction_id"
+          ],
+          "composite": true,
+          "constraint": true,
+          "keyName": "ledger_wallet_transaction_unique",
+          "primary": false,
+          "unique": true
+        },
         {
           "columnNames": [
             "id"
@@ -605,7 +656,18 @@
           "columnName": "direction"
         }
       ],
-      "triggers": [],
+      "triggers": [
+        {
+          "name": "wallet_ledger_immutable",
+          "timing": "before",
+          "events": [
+            "delete",
+            "update"
+          ],
+          "forEach": "statement",
+          "body": ""
+        }
+      ],
       "foreignKeys": {
         "ledger_transaction_fk": {
           "columnNames": [

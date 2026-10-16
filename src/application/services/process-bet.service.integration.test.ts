@@ -1,30 +1,21 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { MikroORM } from "@mikro-orm/postgresql";
-import config from "../../mikro-orm.config.js";
+import { createTestOrm, closeTestOrm } from "../../testing/integration-database.js";
 import { Money } from "../../domain/money.js";
 import { Wallet } from "../../domain/wallet.js";
 import { ConcurrencyConflictError } from "../../domain/ports/concurrency-conflict.error.js";
-import { WagerTransaction, WagerTransactionKind as Kind, WagerTransactionStatus as Status } from "../../domain/wager-transaction.js";
+import { FailureCode, WagerTransaction, WagerTransactionKind as Kind, WagerTransactionStatus as Status } from "../../domain/wager-transaction.js";
 import { MikroOrmWalletRepository } from "../../persistence/repositories/mikro-orm-wallet.repository.js";
 import { MikroOrmWagerTransactionRepository } from "../../persistence/repositories/mikro-orm-wager-transaction.repository.js";
 import { ProcessBetService, createBetRepositories, type BetRepositoryFactory } from "./process-bet.service.js";
 
 let orm: MikroORM;
-const walletIds = new Set<string>();
-beforeAll(async () => { orm = await MikroORM.init(config); });
-afterEach(async () => {
-    for (const id of walletIds) {
-        await orm.em.getConnection().execute("delete from wallet_ledger_entries where wallet_id = ?", [id]);
-        await orm.em.getConnection().execute("delete from wager_transactions where wallet_id = ?", [id]);
-        await orm.em.getConnection().execute("delete from wallets where id = ?", [id]);
-    }
-    walletIds.clear();
-});
-afterAll(async () => { await orm?.close(); });
+beforeAll(async () => { orm = await createTestOrm(); }, 30000);
+afterAll(async () => { await closeTestOrm(orm); });
 
 async function setupWallet() {
     const id = crypto.randomUUID();
-    walletIds.add(id);
+
     const wallet = Wallet.open({ id, playerId: `player-${id}`, initialBalance: Money.from({ amount: "100.00", currency: "BRL" }) });
     await new MikroOrmWalletRepository(orm.em.fork()).create(wallet);
     return wallet;
@@ -49,7 +40,7 @@ async function verify(walletId: string, balance: string, version: number, entrie
     expect(rows).toHaveLength(entries);
     // O saldo inicial desta fixture é 100; os débitos devem reconciliar com ele.
     const [sum] = await orm.em.getConnection().execute("select (100.00 - coalesce(sum(amount), 0))::numeric(18,2)::text as balance from wallet_ledger_entries where wallet_id = ?", [walletId]);
-    expect(sum.balance).toBe(balance);
+    expect(sum?.balance).toBe(balance);
     return rows;
 }
 
@@ -59,15 +50,16 @@ describe("ProcessBetService integration", () => {
         const bet = await setupBet(wallet);
         const result = await new ProcessBetService(orm.em.fork()).execute(bet.id);
         expect(result.status).toBe(Status.Processed);
+        expect(result.observedBalance?.toJSON()).toEqual({ amount: "80.00", currency: "BRL" });
         const stored = await new MikroOrmWagerTransactionRepository(orm.em.fork()).findById(bet.id);
         expect(stored?.status).toBe(Status.Processed);
         expect(stored?.processedAt).toBeInstanceOf(Date);
         const rows = await verify(wallet.id, "80.00", 2, 1);
-        expect(rows[0].transaction_id).toBe(bet.id);
-        expect(rows[0].direction).toBe("DEBIT");
-        expect(rows[0].amount).toBe("20.00");
-        expect(rows[0].balance_before).toBe("100.00");
-        expect(rows[0].balance_after).toBe("80.00");
+        expect(rows[0]?.transaction_id).toBe(bet.id);
+        expect(rows[0]?.direction).toBe("DEBIT");
+        expect(rows[0]?.amount).toBe("20.00");
+        expect(rows[0]?.balance_before).toBe("100.00");
+        expect(rows[0]?.balance_after).toBe("80.00");
     });
 
     it("persists insufficient funds as a terminal rejection without a debit", async () => {
@@ -76,15 +68,15 @@ describe("ProcessBetService integration", () => {
         const service = new ProcessBetService(orm.em.fork());
         const result = await service.execute(bet.id);
         expect(result.status).toBe(Status.Rejected);
-        expect(result.failureCode).toBe("INSUFFICIENT_FUNDS");
-        expect((await service.execute(bet.id)).failureCode).toBe("INSUFFICIENT_FUNDS");
+        expect(result.failureCode).toBe(FailureCode.InsufficientFunds);
+        expect((await service.execute(bet.id)).failureCode).toBe(FailureCode.InsufficientFunds);
         await verify(wallet.id, "100.00", 1, 0);
     });
 
     for (const [overrides, amount, code] of [
-        [{ currency: "USD" }, "20.00", "CURRENCY_MISMATCH"],
-        [{ playerId: "another-player" }, "20.00", "PLAYER_MISMATCH"],
-        [{}, "0.00", "INVALID_AMOUNT"],
+        [{ currency: "USD" }, "20.00", FailureCode.CurrencyMismatch],
+        [{ playerId: "another-player" }, "20.00", FailureCode.PlayerMismatch],
+        [{}, "0.00", FailureCode.InvalidAmount],
     ] as const) {
         it(`rejects ${code} without modifying wallet or ledger`, async () => {
             const wallet = await setupWallet();
@@ -92,6 +84,7 @@ describe("ProcessBetService integration", () => {
             const result = await new ProcessBetService(orm.em.fork()).execute(bet.id);
             expect(result.status).toBe(Status.Rejected);
             expect(result.failureCode).toBe(code);
+            expect(result.observedBalance?.toJSON()).toEqual({ amount: "100.00", currency: "BRL" });
             await verify(wallet.id, "100.00", 1, 0);
         });
     }
@@ -116,6 +109,7 @@ describe("ProcessBetService integration", () => {
             await expect(new ProcessBetService(orm.em.fork(), factory).execute(bet.id)).rejects.toThrow("injected failure");
             expect(attempts).toBe(1);
             expect((await new MikroOrmWagerTransactionRepository(orm.em.fork()).findById(bet.id))?.status).toBe(Status.Pending);
+            expect((await new MikroOrmWagerTransactionRepository(orm.em.fork()).findById(bet.id))?.observedBalance).toBeUndefined();
             await verify(wallet.id, "100.00", 1, 0);
             await new ProcessBetService(orm.em.fork()).execute(bet.id);
             await verify(wallet.id, "80.00", 2, 1);
@@ -127,6 +121,7 @@ describe("ProcessBetService integration", () => {
         const bet = await setupBet(wallet);
         const results = await Promise.all(Array.from({ length: 50 }, () => new ProcessBetService(orm.em.fork()).execute(bet.id)));
         expect(results.every(result => result.status === Status.Processed)).toBe(true);
+        expect(results.every(result => result.observedBalance?.toJSON().amount === "80.00")).toBe(true);
         expect(new Set(results.map(result => result.processedAt?.getTime())).size).toBe(1);
         await verify(wallet.id, "80.00", 2, 1);
     });
@@ -153,7 +148,7 @@ describe("ProcessBetService integration", () => {
         };
         const results = await Promise.all(bets.map(bet => new ProcessBetService(orm.em.fork(), factory).execute(bet.id)));
         expect(results.filter(result => result.status === Status.Processed)).toHaveLength(1);
-        expect(results.filter(result => result.failureCode === "INSUFFICIENT_FUNDS")).toHaveLength(1);
+        expect(results.filter(result => result.failureCode === FailureCode.InsufficientFunds)).toHaveLength(1);
         expect(reads).toBe(3);
         await verify(wallet.id, "20.00", 2, 1);
     });
@@ -194,6 +189,8 @@ describe("ProcessBetService integration", () => {
         await service.execute(second.id);
         const replay = await service.execute(first.id);
         expect(replay.processedAt).toEqual(original.processedAt);
+        expect(original.observedBalance?.toJSON()).toEqual({ amount: "80.00", currency: "BRL" });
+        expect(replay.observedBalance?.toJSON()).toEqual(original.observedBalance?.toJSON());
         await verify(wallet.id, "60.00", 3, 2);
     });
 
@@ -205,4 +202,19 @@ describe("ProcessBetService integration", () => {
         await expect(service.execute(crypto.randomUUID())).rejects.toThrow("not found");
         await verify(wallet.id, "100.00", 1, 0);
     });
+});
+
+it("replays the original rejected balance after another BET, using a new ORM connection", async () => {
+    const wallet = await setupWallet();
+    const rejected = await setupBet(wallet, "120.00");
+    const original = await new ProcessBetService(orm.em.fork()).execute(rejected.id);
+    await new ProcessBetService(orm.em.fork()).execute((await setupBet(wallet)).id);
+    const fresh = await MikroORM.init(orm.config.getAll());
+    try {
+        const replay = await new ProcessBetService(fresh.em.fork()).execute(rejected.id);
+        expect(replay.status).toBe(Status.Rejected);
+        expect(replay.failureCode).toBe(original.failureCode);
+        expect(replay.observedBalance?.toJSON()).toEqual({ amount: "100.00", currency: "BRL" });
+        await verify(wallet.id, "80.00", 2, 1);
+    } finally { await fresh.close(); }
 });

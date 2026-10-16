@@ -52,6 +52,7 @@ export interface WagerTransactionState
     referenceTransactionId?: string;
     failureCode?: FailureCode;
     processedAt?: Date;
+    observedBalance?: Money;
 }
 
 export class WagerTransaction {
@@ -73,6 +74,7 @@ export class WagerTransaction {
         private _referenceTransactionId?: string,
         private _failureCode?: FailureCode,
         private _processedAt?: Date,
+        private _observedBalance?: Money,
     ) { }
 
     static create(
@@ -132,7 +134,12 @@ export class WagerTransaction {
             state.processedAt
                 ? new Date(state.processedAt.getTime())
                 : undefined,
+            state.observedBalance,
         );
+    }
+
+    get observedBalance(): Money | undefined {
+        return this._observedBalance;
     }
 
     get status(): WagerTransactionStatus {
@@ -179,12 +186,14 @@ export class WagerTransaction {
     markProcessed(
         referenceTransactionId: string | undefined,
         at: Date,
+        observedBalance?: Money,
     ): void {
         this.assertNotTerminal();
 
         this._referenceTransactionId =
             referenceTransactionId;
 
+        this._observedBalance = observedBalance;
         this._status = WagerTransactionStatus.Processed;
         this._processedAt = new Date(at.getTime());
     }
@@ -196,9 +205,10 @@ export class WagerTransaction {
             WagerTransactionStatus.PendingReference;
     }
 
-    reject(code: FailureCode): void {
+    reject(code: FailureCode, observedBalance?: Money): void {
         this.assertNotTerminal();
 
+        this._observedBalance = observedBalance;
         this._status = WagerTransactionStatus.Rejected;
         this._failureCode = code;
     }

@@ -1,6 +1,5 @@
 import {
     afterAll,
-    afterEach,
     beforeAll,
     describe,
     expect,
@@ -9,7 +8,7 @@ import {
 
 import { MikroORM } from "@mikro-orm/postgresql";
 
-import config from "../../mikro-orm.config.js";
+import { createTestOrm, closeTestOrm } from "../../testing/integration-database.js";
 import { Money } from "../../domain/money.js";
 import { Wallet } from "../../domain/wallet.js";
 
@@ -19,41 +18,20 @@ import { createWagerFixture } from "../../testing/create-wager-fixture.js";
 
 let orm: MikroORM;
 
-const createdWalletIds = new Set<string>();
 
 beforeAll(async () => {
-    orm = await MikroORM.init(config);
-});
+    orm = await createTestOrm();
+}, 30000);
 
-afterEach(async () => {
-    for (const walletId of createdWalletIds) {
-        await orm.em.getConnection().execute(
-            `delete from wallet_ledger_entries where wallet_id = ?`,
-            [walletId],
-        );
-
-        await orm.em.getConnection().execute(
-            `delete from wager_transactions where wallet_id = ?`,
-            [walletId],
-        );
-
-        await orm.em.getConnection().execute(
-            `delete from wallets where id = ?`,
-            [walletId],
-        );
-    }
-
-    createdWalletIds.clear();
-});
 
 afterAll(async () => {
-    await orm.close();
+    await closeTestOrm(orm);
 });
 
 describe("ApplyWalletDebitService integration", () => {
     it("rolls back the wallet update when ledger insert fails", async () => {
         const walletId = crypto.randomUUID();
-        createdWalletIds.add(walletId);
+
 
         const now = new Date();
 
@@ -123,7 +101,6 @@ describe("ApplyWalletDebitService integration", () => {
         const walletId = crypto.randomUUID();
         const transactionId = crypto.randomUUID();
 
-        createdWalletIds.add(walletId);
 
         const now = new Date();
 
@@ -190,19 +167,19 @@ describe("ApplyWalletDebitService integration", () => {
 
         expect(ledgerRows).toHaveLength(1);
 
-        expect(ledgerRows[0].transaction_id)
+        expect(ledgerRows[0]?.transaction_id)
             .toBe(transactionId);
 
-        expect(ledgerRows[0].direction)
+        expect(ledgerRows[0]?.direction)
             .toBe("DEBIT");
 
-        expect(ledgerRows[0].amount)
+        expect(ledgerRows[0]?.amount)
             .toBe("20.00");
 
-        expect(ledgerRows[0].balance_before)
+        expect(ledgerRows[0]?.balance_before)
             .toBe("100.00");
 
-        expect(ledgerRows[0].balance_after)
+        expect(ledgerRows[0]?.balance_after)
             .toBe("80.00");
     });
 });

@@ -1,66 +1,95 @@
 # Processamento de BET — etapa atual
 
-`ProcessBetService.execute(transactionId)` processa uma `WagerTransaction` BET
-já persistida. Retorna a transação com seu estado final. Segue o padrão do
-`ApplyWalletDebitService`: coordenação na aplicação, regras monetárias no domínio
-e adapters MikroORM implementando as portas de persistência.
+Mantemos domínio independente de Nest/ORM, portas de persistência e adapters
+MikroORM. Money usa Decimal e strings decimais; PostgreSQL usa numeric(18,2).
+
+## Admissão e idempotência persistente
+
+`AcceptBetService.execute(command)` admite somente BET e retorna a transação
+persistida. O chamador usa seu ID em `ProcessBetService.execute(id)`.
+Admissão e processamento são etapas separadas: uma interrupção entre elas deixa
+PENDING persistido, recuperável pelo mesmo pedido. Ainda não há worker para isso.
+
+O serviço calcula SHA-256 de campos explícitos em ordem fixa: provider,
+externalTransactionId, wallet, player, round, game, kind e Money normalizado.
+Não aceita hash do chamador. As constraints existentes de
+`(provider_id, idempotency_key)` e `(provider_id, external_transaction_id)`
+arbitram inclusive inserções concorrentes, sem cache em memória.
+Após violação de unicidade, uma nova leitura verifica ambas as identidades:
+mesma transação e mesmo hash retornam o registro original; divergência lança
+`IdempotencyConflictError` com código `IDEMPOTENCY_CONFLICT`, sem alterar o original.
+Reutilizar externalTransactionId com outra key também é conflito; outro provider
+tem namespace independente. Erros de infraestrutura são propagados.
+Fixtures e registros antigos com hashes arbitrários não ganham automaticamente
+compatibilidade com o hash canônico; novos chamadores devem usar essa admissão.
 
 ## Transação e concorrência
 
-Cada tentativa abre uma transação PostgreSQL com um EntityManager novo. Os três
-repositories recebem o mesmo manager transacional. O fluxo é:
+Cada tentativa do processador abre uma transação PostgreSQL e EntityManager novo.
+Os três repositories recebem o mesmo manager transacional:
 
 1. Ler a BET; se terminal, retornar seu estado persistido sem novo débito.
 2. Ler a wallet e validar jogador, moeda, valor e saldo.
 3. Debitar pelo domínio e atualizar a wallet condicionando à versão lida.
-4. Inserir o ledger com os saldos antes/depois retornados pelo domínio.
-5. Marcar a BET como PROCESSED e atualizar condicionando ao status PENDING.
-6. Confirmar tudo junto; qualquer erro reverte todas as gravações da tentativa.
+4. Inserir o ledger com os saldos antes/depois do movimento.
+5. Persistir PROCESSED e saldo observado condicionando ao status PENDING.
+6. Confirmar tudo junto; falhas revertem todas as gravações da tentativa.
 
-Os repositories lançam `ConcurrencyConflictError` quando o update condicionado
-não altera uma linha. O serviço repete a transação completa, no máximo cinco
-tentativas, relendo o estado. Não reutiliza objetos de uma tentativa revertida.
-Após esgotar o limite, propaga o erro para o futuro chamador reagendar a operação.
-Erros de infraestrutura também são propagados; não viram rejeições de negócio.
-O serviço recusa uma transação externa, pois precisa controlar seu próprio commit
-e rollback. Não há lock global nem garantia baseada em memória.
+Updates condicionados sem linha afetada lançam `ConcurrencyConflictError`.
+O serviço repete a transação completa até cinco tentativas, relendo o estado.
+Esgotado o limite, propaga o erro ao chamador. Não há lock global; os serviços
+recusam EntityManager já transacional para controlar seus próprios commits.
+Duas BETs de 80.00 disputando 100.00 resultam em um débito, saldo 20.00 e uma
+rejeição após releitura. Não há publicação de eventos nesta etapa.
 
-Exemplo: duas BETs de 80.00 lendo saldo 100.00/version 1. Uma grava 20.00/version 2.
-A outra perde o update por versão, faz rollback e relê 20.00. Na nova tentativa,
-registra REJECTED/INSUFFICIENT_FUNDS sem ledger.
+## Rejeições e replay
 
-## Rejeições
+Rejeições usam `INSUFFICIENT_FUNDS`, `CURRENCY_MISMATCH`, `PLAYER_MISMATCH`
+ou `INVALID_AMOUNT`. Persistem status, código e saldo observado, sem alterar
+wallet/versão nem gerar ledger. IDs inexistentes, tipos diferentes de BET e
+estados não terminais diferentes de PENDING são erros de chamada.
 
-- `INSUFFICIENT_FUNDS`: saldo insuficiente.
-- `CURRENCY_MISMATCH`: moeda da BET diferente da wallet.
-- `PLAYER_MISMATCH`: jogador da BET diferente do titular da wallet.
-- `INVALID_AMOUNT`: BET sem valor estritamente positivo. A wallet continua
-  aceitando movimento zero como no-op; este caso de uso rejeita BET zero.
+O retorno continua sendo WagerTransaction, agora com `observedBalance?: Money`.
+O saldo e sua moeda são gravados atomicamente com a decisão, inclusive quando
+a moeda da BET diverge da wallet. Replay nunca consulta o saldo atual para
+compor esse resultado. Ainda não há DTO/endpoint HTTP.
+A migration recupera o saldo de BETs PROCESSED antigas pelo ledger. Para terminais
+antigas sem histórico suficiente (por exemplo REJECTED), mantém undefined/null;
+não inventa um saldo original. Novas decisões deste processador sempre o gravam.
 
-Rejeições persistem apenas status/código da BET. Não alteram saldo nem versão e
-não geram ledger. Tipos diferentes de BET, IDs ausentes e estados não terminais
-diferentes de PENDING são erros de chamada neste serviço.
+## Garantias de schema e reversibilidade
 
-## Verificação e limites desta etapa
+`Migration20261016180000` acrescenta `UNIQUE(wallet_id, transaction_id)`,
+também mapeado na entidade, e um trigger PostgreSQL que rejeita UPDATE, DELETE
+e TRUNCATE do ledger com SQLSTATE 55000. INSERT continua permitido. Não há bypass
+de teste no trigger. A migration também adiciona saldo/moeda observados com CHECK
+de não-negatividade e preenchimento conjunto. Constraints anteriores são preservadas.
 
-`bun test` inclui PostgreSQL real conforme `src/mikro-orm.config.ts`; o container
-deve estar ativo e as migrations existentes aplicadas. Os testes usam fixtures
-com IDs próprios e removem apenas seus dados. A barreira no teste de concorrência
-garante que duas tentativas leiam a mesma versão, exercitando o conflito real.
-Há cobertura de 50 chamadas paralelas da mesma BET, wallets independentes,
-rejeições, limite de retries e falhas injetadas após gravações reais do ledger
-e do status. Também verificar com `bun run typecheck` e `bun run build`.
+O down remove somente essas adições, preservando as linhas do ledger; perde as
+colunas de saldo histórico, portanto rejeições não podem ser reconstruídas depois.
+Dados duplicados preexistentes fazem o up falhar atomicamente, sem limpeza silenciosa.
+Como qualquer trigger, a proteção pode ser removida por um administrador: em
+produção, o usuário da aplicação deve ser separado do dono do schema/migrations.
+Revisar migrations geradas: checks, FKs e trigger manuais não estão todos no
+metadata do ORM e não devem ser removidos automaticamente.
 
-O escopo é processamento de BET existente, sem endpoint/worker SQS, inbox ou
-outbox. A deduplicação aqui é por ID interno persistido; admissão por idempotency
-key e conflito de payload continuam fora deste caso de uso. O retorno contém a
-WagerTransaction, sem DTO de saldo histórico; os saldos originais ficam no ledger.
-O serviço antigo de débito permanece como exercício de atomicidade e não deve
-ser usado para processar BET em produção, pois não coordena o status da aposta.
+## Verificação e limites
 
-Os testes concorrentes usam conexões independentes no mesmo processo; ainda não
-comprovam o cenário completo de três processos, crash/ack ou reinício. As fixtures
-partem de saldo 100.00 e reconciliam saldo inicial menos débitos; abertura com
-ledger próprio é uma etapa separada. Não foram adicionadas migrations nesta
-etapa: unicidade por wallet/transação e imutabilidade do ledger no schema ainda
-precisam ser concluídas para cumprir todos os requisitos do desafio.
+Com PostgreSQL do Compose ativo: `bun run typecheck`, `bun run build`,
+`bun run db:migration:up` e `bun test`. O CLI de migrations usa dist, portanto
+executar build antes dele. O typecheck usa tsconfig.typecheck.json e inclui testes;
+o build de produção exclui testes e src/testing. check-db.ts foi removido.
+
+Cada suíte de integração cria um banco aleatório wagering_test_* no PostgreSQL
+configurado, aplica as migrations de src e remove somente seu próprio banco ao
+encerrar. Requer permissão CREATEDB; não modifica dados do banco de desenvolvimento
+nem desliga o trigger. Interrupção abrupta do runner pode deixar banco temporário.
+Há testes de SQL direto para unicidade/imutabilidade, down/up com dados, backfill,
+replay após reconexão e outro débito, conflitos concorrentes de payload, 50 admissões
+e processamentos paralelos, duas BETs disputando saldo e rollback após falhas reais.
+
+Sem Inbox/Outbox/SQS, API completa, OPENING ou demais operações nesta etapa.
+Os testes concorrentes usam conexões no mesmo processo: não comprovam três processos
+nem crash/ack. As fixtures reconciliam saldo inicial menos débitos; abertura com
+ledger próprio continua separada. ApplyWalletDebitService permanece um exercício
+de atomicidade e não deve processar BET em produção, pois não coordena seu status.

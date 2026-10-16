@@ -16,6 +16,8 @@ export const WalletLedgerEntryEntity =
     name: "WalletLedgerEntryEntity",
     tableName: "wallet_ledger_entries",
 
+    uniques: [{ name: "ledger_wallet_transaction_unique", properties: ["walletId", "transactionId"] }],
+
     properties: {
       id: {
         type: "uuid",

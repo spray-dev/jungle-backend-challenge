@@ -91,6 +91,7 @@ export class MikroOrmWagerTransactionRepository
             },
             {
                 status: row.status,
+                ...(row.observedBalance !== undefined ? { observedBalance: row.observedBalance, observedCurrency: row.observedCurrency } : {}),
 
                 ...(row.referenceTransactionId !== undefined
                     ? {
@@ -159,6 +160,8 @@ export class MikroOrmWagerTransactionRepository
                 row.failureCode as FailureCode | undefined,
 
             processedAt: row.processedAt,
+            observedBalance: row.observedBalance != null && row.observedCurrency != null
+                ? Money.from({ amount: row.observedBalance, currency: row.observedCurrency }) : undefined,
         });
     }
 
@@ -195,6 +198,8 @@ export class MikroOrmWagerTransactionRepository
 
             createdAt: transaction.createdAt,
             processedAt: transaction.processedAt,
+            observedBalance: transaction.observedBalance?.toJSON().amount,
+            observedCurrency: transaction.observedBalance?.currency,
         };
     }
 }

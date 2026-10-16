@@ -1,6 +1,5 @@
 import {
     afterAll,
-    afterEach,
     beforeAll,
     describe,
     expect,
@@ -9,14 +8,13 @@ import {
 
 import { MikroORM } from "@mikro-orm/postgresql";
 
-import config from "../../mikro-orm.config.js";
+import { createTestOrm, closeTestOrm } from "../../testing/integration-database.js";
 import { Money } from "../../domain/money.js";
 import { Wallet } from "../../domain/wallet.js";
 import { MikroOrmWalletRepository } from "./mikro-orm-wallet.repository.js";
 
 let orm: MikroORM;
 
-const createdWalletIds = new Set<string>();
 
 function makeWallet(
     id: string,
@@ -39,27 +37,12 @@ function makeWallet(
 }
 
 beforeAll(async () => {
-    orm = await MikroORM.init(config);
-});
+    orm = await createTestOrm();
+}, 30000);
 
-afterEach(async () => {
-    for (const id of createdWalletIds) {
-        await orm.em.getConnection().execute(
-            `delete from wallet_ledger_entries where wallet_id = ?`,
-            [id],
-        );
-
-        await orm.em.getConnection().execute(
-            `delete from wallets where id = ?`,
-            [id],
-        );
-    }
-
-    createdWalletIds.clear();
-});
 
 afterAll(async () => {
-    await orm.close();
+    await closeTestOrm(orm);
 });
 
 describe("MikroOrmWalletRepository integration", () => {
@@ -69,7 +52,7 @@ describe("MikroOrmWalletRepository integration", () => {
         );
 
         const id = crypto.randomUUID();
-        createdWalletIds.add(id);
+
 
         const wallet = makeWallet(id);
 
@@ -98,7 +81,7 @@ describe("MikroOrmWalletRepository integration", () => {
         );
 
         const id = crypto.randomUUID();
-        createdWalletIds.add(id);
+
 
         await repository.create(makeWallet(id));
 
@@ -144,7 +127,7 @@ describe("MikroOrmWalletRepository integration", () => {
             new MikroOrmWalletRepository(orm.em.fork());
 
         const id = crypto.randomUUID();
-        createdWalletIds.add(id);
+
 
         await setupRepository.create(makeWallet(id));
 

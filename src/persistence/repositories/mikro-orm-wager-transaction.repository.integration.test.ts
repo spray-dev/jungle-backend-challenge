@@ -1,6 +1,5 @@
 import {
     afterAll,
-    afterEach,
     beforeAll,
     describe,
     expect,
@@ -9,7 +8,7 @@ import {
 
 import { MikroORM } from "@mikro-orm/postgresql";
 
-import config from "../../mikro-orm.config.js";
+import { createTestOrm, closeTestOrm } from "../../testing/integration-database.js";
 import { Money } from "../../domain/money.js";
 import { Wallet } from "../../domain/wallet.js";
 
@@ -24,40 +23,19 @@ import { MikroOrmWagerTransactionRepository } from "./mikro-orm-wager-transactio
 
 let orm: MikroORM;
 
-const walletIds = new Set<string>();
-const wagerIds = new Set<string>();
 
 beforeAll(async () => {
-    orm = await MikroORM.init(config);
-});
+    orm = await createTestOrm();
+}, 30000);
 
-afterEach(async () => {
-    for (const id of wagerIds) {
-        await orm.em.getConnection().execute(
-            `delete from wager_transactions where id = ?`,
-            [id],
-        );
-    }
-
-    for (const id of walletIds) {
-        await orm.em.getConnection().execute(
-            `delete from wallets where id = ?`,
-            [id],
-        );
-    }
-
-    wagerIds.clear();
-    walletIds.clear();
-});
 
 afterAll(async () => {
-    await orm.close();
+    await closeTestOrm(orm);
 });
 
 async function createWallet(): Promise<string> {
     const id = crypto.randomUUID();
 
-    walletIds.add(id);
 
     const now = new Date();
 
@@ -87,7 +65,6 @@ function createWager(
 ): WagerTransaction {
     const id = crypto.randomUUID();
 
-    wagerIds.add(id);
 
     return WagerTransaction.create({
         id,

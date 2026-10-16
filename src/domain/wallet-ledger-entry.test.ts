@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Money } from "./money";
-import { WalletLedgerEntry } from "./wallet-ledger-entry";
+import { Money } from "./money.js";
+import { WalletLedgerEntry } from "./wallet-ledger-entry.js";
 
 describe("WalletLedgerEntry", () => {
   test("creates a consistent debit entry", () => {

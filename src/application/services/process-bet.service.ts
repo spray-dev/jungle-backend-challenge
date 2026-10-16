@@ -62,7 +62,7 @@ export class ProcessBetService {
                         : undefined;
 
                     if (failureCode !== undefined) {
-                        bet.reject(failureCode);
+                        bet.reject(failureCode, wallet.balance);
                         await wagers.update(bet, expectedStatus);
                         return bet;
                     }
@@ -77,7 +77,7 @@ export class ProcessBetService {
                         balanceBefore: movement.balanceBefore, balanceAfter: movement.balanceAfter,
                         createdAt: at,
                     }));
-                    bet.markProcessed(undefined, at);
+                    bet.markProcessed(undefined, at, wallet.balance);
                     await wagers.update(bet, expectedStatus);
                     return bet;
                 }, { clear: true });
