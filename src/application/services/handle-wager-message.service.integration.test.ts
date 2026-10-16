@@ -103,7 +103,7 @@ async function command():
     };
 }
 
-it("commits inbox, wager, wallet and ledger together", async () => {
+it("commits inbox, wager, wallet, ledger and outbox together", async () => {
     const input =
         await command();
 
@@ -192,6 +192,31 @@ it("commits inbox, wager, wallet and ledger together", async () => {
 
     expect(ledgerRows)
         .toHaveLength(1);
+
+    const outboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select *
+                from outbox_messages
+                where event_type = ?
+            `,
+                [
+                    "WagerTransactionProcessed",
+                ],
+            );
+
+    expect(outboxRows)
+        .toHaveLength(1);
+
+    expect(
+        outboxRows[0]?.published_at,
+    ).toBeNull();
+
+    expect(
+        outboxRows[0]?.attempts,
+    ).toBe(0);
 });
 
 it("replays the same message without debiting twice", async () => {
@@ -248,6 +273,23 @@ it("replays the same message without debiting twice", async () => {
             );
 
     expect(ledgerRows)
+        .toHaveLength(1);
+
+    const outboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select *
+                from outbox_messages
+                where payload -> 'data' ->> 'transactionId' = ?
+            `,
+                [
+                    first.transaction.id,
+                ],
+            );
+
+    expect(outboxRows)
         .toHaveLength(1);
 });
 

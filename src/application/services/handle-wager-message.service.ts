@@ -2,7 +2,11 @@ import { EntityManager } from "@mikro-orm/postgresql";
 
 import { InboxMessage } from "../../domain/inbox-message.js";
 import { ConcurrencyConflictError } from "../../domain/ports/concurrency-conflict.error.js";
-import type { WagerTransaction } from "../../domain/wager-transaction.js";
+
+import {
+    WagerTransactionStatus,
+    type WagerTransaction,
+} from "../../domain/wager-transaction.js";
 
 import { MikroOrmInboxMessageRepository } from "../../persistence/repositories/mikro-orm-inbox-message.repository.js";
 
@@ -14,6 +18,22 @@ import {
 import {
     processBetInTransaction,
 } from "./process-bet.service.js";
+
+import {
+    OutboxMessage,
+} from "../../domain/outbox-message.js";
+
+import {
+    WagerTransactionProcessedEvent,
+} from "../../domain/events/wager-transaction-processed.event.js";
+
+import {
+    WagerTransactionRejectedEvent,
+} from "../../domain/events/wager-transaction-rejected.event.js";
+
+import {
+    MikroOrmOutboxMessageRepository,
+} from "../../persistence/repositories/mikro-orm-outbox-message.repository.js";
 
 export interface HandleWagerMessageCommand {
     consumerName: string;
@@ -217,6 +237,43 @@ export class HandleWagerMessageService {
                 tx,
                 accepted.transaction.id,
             );
+
+        const occurredAt =
+            new Date();
+
+        const event =
+            transaction.status ===
+                WagerTransactionStatus.Processed
+                ? new WagerTransactionProcessedEvent(
+                    crypto.randomUUID(),
+                    occurredAt,
+                    transaction,
+                )
+                : transaction.status ===
+                    WagerTransactionStatus.Rejected
+                    ? new WagerTransactionRejectedEvent(
+                        crypto.randomUUID(),
+                        occurredAt,
+                        transaction,
+                    )
+                    : null;
+
+        if (event !== null) {
+            const outboxRepository =
+                new MikroOrmOutboxMessageRepository(
+                    tx,
+                );
+
+            const outboxMessage =
+                OutboxMessage.fromEvent(
+                    event,
+                    occurredAt,
+                );
+
+            await outboxRepository.insert(
+                outboxMessage,
+            );
+        }
 
         inbox.markProcessed(
             new Date(),

@@ -5,6 +5,9 @@ import { WalletEntity } from "./persistence/entities/wallet.entity.js";
 import { WalletLedgerEntryEntity } from "./persistence/entities/wallet-ledger-entry.entity.js";
 import { WagerTransactionEntity } from "./persistence/entities/wager-transaction.entity.js";
 import { InboxMessageEntity } from "./persistence/entities/inbox-message.entity.js";
+import {
+    OutboxMessageEntity,
+} from "./persistence/entities/outbox-message.entity.js";
 
 export default defineConfig({
     host: "localhost",
@@ -18,6 +21,7 @@ export default defineConfig({
         WalletLedgerEntryEntity,
         WagerTransactionEntity,
         InboxMessageEntity,
+        OutboxMessageEntity,
     ],
 
     extensions: [Migrator],
