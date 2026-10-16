@@ -36,9 +36,7 @@ export class MikroOrmInboxMessageRepository
     async tryInsert(
         message: InboxMessage,
     ): Promise<boolean> {
-        const rows = await this.em
-            .getConnection()
-            .execute(
+        const rows = await this.em.execute<any[]>(
                 `
                     insert into inbox_messages (
                         consumer_name,
@@ -78,9 +76,7 @@ export class MikroOrmInboxMessageRepository
             );
         }
 
-        const rows = await this.em
-            .getConnection()
-            .execute(
+        const rows = await this.em.execute<any[]>(
                 `
                     update inbox_messages
                     set processed_at = ?
@@ -102,6 +98,7 @@ export class MikroOrmInboxMessageRepository
             );
         }
     }
+
 
     private toDomain(
         row: InboxMessageRow,

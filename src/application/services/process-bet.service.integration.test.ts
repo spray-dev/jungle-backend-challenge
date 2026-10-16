@@ -7,7 +7,12 @@ import { ConcurrencyConflictError } from "../../domain/ports/concurrency-conflic
 import { FailureCode, WagerTransaction, WagerTransactionKind as Kind, WagerTransactionStatus as Status } from "../../domain/wager-transaction.js";
 import { MikroOrmWalletRepository } from "../../persistence/repositories/mikro-orm-wallet.repository.js";
 import { MikroOrmWagerTransactionRepository } from "../../persistence/repositories/mikro-orm-wager-transaction.repository.js";
-import { ProcessBetService, createBetRepositories, type BetRepositoryFactory } from "./process-bet.service.js";
+import {
+    ProcessBetService,
+    createBetRepositories,
+    processBetInTransaction,
+    type BetRepositoryFactory,
+} from "./process-bet.service.js";
 
 let orm: MikroORM;
 beforeAll(async () => { orm = await createTestOrm(); }, 30000);
@@ -202,19 +207,66 @@ describe("ProcessBetService integration", () => {
         await expect(service.execute(crypto.randomUUID())).rejects.toThrow("not found");
         await verify(wallet.id, "100.00", 1, 0);
     });
+
+    it("participates in an outer transaction and rolls back with it", async () => {
+        const wallet =
+            await setupWallet();
+
+        const bet =
+            await setupBet(wallet);
+
+        await expect(
+            orm.em
+                .fork()
+                .transactional(async tx => {
+                    await processBetInTransaction(
+                        tx,
+                        bet.id,
+                    );
+
+                    throw new Error(
+                        "outer transaction failed",
+                    );
+                }),
+        ).rejects.toThrow(
+            "outer transaction failed",
+        );
+
+        const stored =
+            await new MikroOrmWagerTransactionRepository(
+                orm.em.fork(),
+            ).findById(
+                bet.id,
+            );
+
+        expect(
+            stored?.status,
+        ).toBe(
+            Status.Pending,
+        );
+
+        await verify(
+            wallet.id,
+            "100.00",
+            1,
+            0,
+        );
+    });
+
+    it("replays the original rejected balance after another BET, using a new ORM connection", async () => {
+        const wallet = await setupWallet();
+        const rejected = await setupBet(wallet, "120.00");
+        const original = await new ProcessBetService(orm.em.fork()).execute(rejected.id);
+        await new ProcessBetService(orm.em.fork()).execute((await setupBet(wallet)).id);
+        const fresh = await MikroORM.init(orm.config.getAll());
+        try {
+            const replay = await new ProcessBetService(fresh.em.fork()).execute(rejected.id);
+            expect(replay.status).toBe(Status.Rejected);
+            expect(replay.failureCode).toBe(original.failureCode);
+            expect(replay.observedBalance?.toJSON()).toEqual({ amount: "100.00", currency: "BRL" });
+            await verify(wallet.id, "80.00", 2, 1);
+        } finally { await fresh.close(); }
+    });
 });
 
-it("replays the original rejected balance after another BET, using a new ORM connection", async () => {
-    const wallet = await setupWallet();
-    const rejected = await setupBet(wallet, "120.00");
-    const original = await new ProcessBetService(orm.em.fork()).execute(rejected.id);
-    await new ProcessBetService(orm.em.fork()).execute((await setupBet(wallet)).id);
-    const fresh = await MikroORM.init(orm.config.getAll());
-    try {
-        const replay = await new ProcessBetService(fresh.em.fork()).execute(rejected.id);
-        expect(replay.status).toBe(Status.Rejected);
-        expect(replay.failureCode).toBe(original.failureCode);
-        expect(replay.observedBalance?.toJSON()).toEqual({ amount: "100.00", currency: "BRL" });
-        await verify(wallet.id, "80.00", 2, 1);
-    } finally { await fresh.close(); }
-});
+

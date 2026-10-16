@@ -17,6 +17,9 @@ export interface WagerTransactionRepository {
     ): Promise<WagerTransaction | null>;
 
     insert(transaction: WagerTransaction): Promise<void>;
+    tryInsert(
+        transaction: WagerTransaction,
+    ): Promise<boolean>;
 
     update(
         transaction: WagerTransaction,

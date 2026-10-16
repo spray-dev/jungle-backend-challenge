@@ -77,6 +77,78 @@ export class MikroOrmWagerTransactionRepository
         );
     }
 
+    async tryInsert(
+        transaction: WagerTransaction,
+    ): Promise<boolean> {
+        const row = this.toRow(transaction);
+
+        const rows = await this.em.execute<any[]>(
+            `
+        insert into wager_transactions (
+            id,
+            provider_id,
+            external_transaction_id,
+            idempotency_key,
+            payload_hash,
+            wallet_id,
+            player_id,
+            round_id,
+            game_id,
+            kind,
+            status,
+            amount,
+            currency,
+            reference_external_transaction_id,
+            reference_transaction_id,
+            failure_code,
+            created_at,
+            processed_at,
+            observed_balance,
+            observed_currency
+        )
+        values (
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?
+        )
+        on conflict do nothing
+        returning id
+    `,
+            [
+                row.id,
+                row.providerId,
+                row.externalTransactionId,
+                row.idempotencyKey,
+                row.payloadHash,
+
+                row.walletId,
+                row.playerId,
+                row.roundId,
+                row.gameId,
+
+                row.kind,
+                row.status,
+
+                row.amount,
+                row.currency,
+
+                row.referenceExternalTransactionId ?? null,
+                row.referenceTransactionId ?? null,
+
+                row.failureCode ?? null,
+
+                row.createdAt,
+                row.processedAt ?? null,
+
+                row.observedBalance ?? null,
+                row.observedCurrency ?? null,
+            ],
+        );
+
+        return rows.length === 1;
+    }
+
     async update(
         transaction: WagerTransaction,
         expectedStatus: WagerTransactionStatus,
