@@ -39,7 +39,7 @@ for (const operation of ["update", "delete", "truncate"] as const) {
         const sql = operation === "update"
             ? "update wallet_ledger_entries set amount = 10, balance_after = 90 where wallet_id = ?"
             : operation === "delete" ? "delete from wallet_ledger_entries where wallet_id = ?"
-            : "truncate wallet_ledger_entries";
+                : "truncate wallet_ledger_entries";
         await expect(connection.execute(sql, operation === "truncate" ? [] : [id]))
             .rejects.toMatchObject({ code: "55000" });
         expect(await connection.execute("select * from wallet_ledger_entries where wallet_id = ?", [id])).toEqual(before);
@@ -68,4 +68,70 @@ it("reverses and reapplies the migration without losing ledger data; backfills o
     await expect(connection.execute("delete from wallet_ledger_entries where wallet_id = ?", [id])).rejects.toMatchObject({ code: "55000" });
     await expect(connection.execute(`insert into wallet_ledger_entries select ?, wallet_id, transaction_id, direction, amount, balance_before, balance_after, created_at
         from wallet_ledger_entries where wallet_id = ?`, [crypto.randomUUID(), id])).rejects.toMatchObject({ code: "23505" });
+});
+
+it("rejects ledger whose transaction belongs to another wallet", async () => {
+    // Wallet A + BET processada corretamente nela.
+    // O fixture já cria o ledger válido da transação na Wallet A.
+    const { transactionId } = await fixture();
+
+    // Criamos uma Wallet B real para garantir que ledger_wallet_fk passe.
+    // Assim, se o INSERT falhar, sabemos que foi especificamente por causa
+    // da relação transaction + wallet.
+    const walletBId = crypto.randomUUID();
+
+    await new MikroOrmWalletRepository(
+        orm.em.fork(),
+    ).create(
+        Wallet.open({
+            id: walletBId,
+            playerId: "player-" + walletBId,
+            initialBalance: Money.from({
+                amount: "100.00",
+                currency: "BRL",
+            }),
+        }),
+    );
+
+    const connection = orm.em.getConnection();
+
+    await expect(
+        connection.execute(
+            `
+                insert into wallet_ledger_entries (
+                    id,
+                    wallet_id,
+                    transaction_id,
+                    direction,
+                    amount,
+                    balance_before,
+                    balance_after,
+                    created_at
+                )
+                values (?, ?, ?, 'DEBIT', 20, 100, 80, now())
+            `,
+            [
+                crypto.randomUUID(),
+                walletBId,
+                transactionId,
+            ],
+        ),
+    ).rejects.toMatchObject({
+        code: "23503",
+        constraint: "ledger_transaction_wallet_fk",
+    });
+
+    // E confirmamos que nenhuma linha inválida entrou na Wallet B.
+    const invalidRows =
+        await connection.execute(
+            `
+                select id
+                from wallet_ledger_entries
+                where wallet_id = ?
+                  and transaction_id = ?
+            `,
+            [walletBId, transactionId],
+        );
+
+    expect(invalidRows).toHaveLength(0);
 });

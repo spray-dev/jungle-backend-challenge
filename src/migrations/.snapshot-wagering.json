@@ -117,7 +117,7 @@
           "autoincrement": false,
           "primary": true,
           "nullable": false,
-          "unique": false,
+          "unique": true,
           "length": null,
           "precision": null,
           "scale": null,
@@ -363,6 +363,17 @@
         }
       },
       "indexes": [
+        {
+          "columnNames": [
+            "id",
+            "wallet_id"
+          ],
+          "composite": true,
+          "constraint": true,
+          "keyName": "wager_transactions_id_wallet_unique",
+          "primary": false,
+          "unique": true
+        },
         {
           "columnNames": [
             "id"
@@ -669,14 +680,16 @@
         }
       ],
       "foreignKeys": {
-        "ledger_transaction_fk": {
+        "ledger_transaction_wallet_fk": {
           "columnNames": [
-            "transaction_id"
+            "transaction_id",
+            "wallet_id"
           ],
-          "constraintName": "ledger_transaction_fk",
+          "constraintName": "ledger_transaction_wallet_fk",
           "localTableName": "public.wallet_ledger_entries",
           "referencedColumnNames": [
-            "id"
+            "id",
+            "wallet_id"
           ],
           "referencedTableName": "public.wager_transactions",
           "deleteRule": "restrict"
