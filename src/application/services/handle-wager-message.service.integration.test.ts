@@ -23,6 +23,7 @@ import { MikroOrmWalletRepository } from "../../persistence/repositories/mikro-o
 import {
     HandleWagerMessageService,
     InboxPayloadConflictError,
+    handleWagerMessageInTransaction,
     type HandleWagerMessageCommand,
 } from "./handle-wager-message.service.js";
 
@@ -341,8 +342,8 @@ it("rolls back inbox when wager persistence fails", async () => {
 
     /*
      * Wallet inexistente:
-     * acceptBet insere a wager,
-     * mas processBet falha depois.
+     * Inbox é inserida primeiro,
+     * mas a Wager viola a FK de wallet.
      *
      * A transaction inteira precisa voltar.
      */
@@ -414,4 +415,240 @@ it("rolls back inbox when wager persistence fails", async () => {
 
     expect(wagerRows)
         .toHaveLength(0);
+});
+
+it("rolls back inbox, wager, wallet, ledger and outbox together", async () => {
+    const input =
+        await command();
+
+    await expect(
+        orm.em.fork().transactional(
+            async tx => {
+                const result =
+                    await handleWagerMessageInTransaction(
+                        tx,
+                        input,
+                    );
+
+                expect(
+                    result.transaction.status,
+                ).toBe(
+                    WagerTransactionStatus.Processed,
+                );
+
+                /*
+                    * Nesse ponto tudo já aconteceu:
+                    *
+                    * Inbox
+                    * Wager
+                    * Wallet debit
+                    * Ledger
+                    * Outbox
+                    *
+                    * Mas ainda NÃO houve commit.
+                    */
+                throw new Error(
+                    "forced outer rollback",
+                );
+            },
+        ),
+    ).rejects.toThrow(
+        "forced outer rollback",
+    );
+
+    const walletRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select balance, version
+                from wallets
+                where id = ?
+            `,
+                [
+                    input.wager.walletId,
+                ],
+            );
+
+    expect(walletRows)
+        .toHaveLength(1);
+
+    expect(
+        walletRows[0]?.balance,
+    ).toBe("100.00");
+
+    expect(
+        walletRows[0]?.version,
+    ).toBe(1);
+
+    const wagerRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select id
+                from wager_transactions
+                where provider_id = ?
+                    and external_transaction_id = ?
+            `,
+                [
+                    input.wager.providerId,
+                    input.wager
+                        .externalTransactionId,
+                ],
+            );
+
+    expect(wagerRows)
+        .toHaveLength(0);
+
+    const ledgerRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select id
+                from wallet_ledger_entries
+                where wallet_id = ?
+            `,
+                [
+                    input.wager.walletId,
+                ],
+            );
+
+    expect(ledgerRows)
+        .toHaveLength(0);
+
+    const inboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select *
+                from inbox_messages
+                where consumer_name = ?
+                    and message_id = ?
+            `,
+                [
+                    input.consumerName,
+                    input.messageId,
+                ],
+            );
+
+    expect(inboxRows)
+        .toHaveLength(0);
+
+    const outboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                select *
+                from outbox_messages
+                where payload
+                    -> 'data'
+                    ->> 'externalTransactionId' = ?
+            `,
+                [
+                    input.wager
+                        .externalTransactionId,
+                ],
+            );
+
+    expect(outboxRows)
+        .toHaveLength(0);
+});
+
+it("does not create a second outbox event for the same financial operation", async () => {
+    const input =
+        await command();
+
+    const secondMessageId =
+        crypto.randomUUID();
+
+    const service =
+        new HandleWagerMessageService(
+            orm.em.fork(),
+        );
+
+    const first =
+        await service.execute(
+            input,
+        );
+
+    const second =
+        await service.execute({
+            ...input,
+            messageId:
+                secondMessageId,
+        });
+
+    expect(
+        first.transaction.id,
+    ).toBe(
+        second.transaction.id,
+    );
+
+    expect(
+        second.duplicateMessage,
+    ).toBe(false);
+
+    expect(
+        second.idempotentReplay,
+    ).toBe(true);
+
+    const ledgerRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from wallet_ledger_entries
+                    where transaction_id = ?
+                `,
+                [
+                    first.transaction.id,
+                ],
+            );
+
+    expect(ledgerRows)
+        .toHaveLength(1);
+
+    const outboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from outbox_messages
+                    where payload
+                        -> 'data'
+                        ->> 'transactionId' = ?
+                `,
+                [
+                    first.transaction.id,
+                ],
+            );
+
+    expect(outboxRows)
+        .toHaveLength(1);
+
+    const inboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select message_id
+                    from inbox_messages
+                    where consumer_name = ?
+                      and message_id in (?, ?)
+                `,
+                [
+                    input.consumerName,
+                    input.messageId,
+                    secondMessageId,
+                ],
+            );
+
+    expect(inboxRows)
+        .toHaveLength(2);
 });

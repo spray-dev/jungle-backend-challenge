@@ -35,6 +35,157 @@ import {
     MikroOrmOutboxMessageRepository,
 } from "../../persistence/repositories/mikro-orm-outbox-message.repository.js";
 
+export async function handleWagerMessageInTransaction(
+    tx: EntityManager,
+    command: HandleWagerMessageCommand,
+): Promise<HandleWagerMessageResult> {
+    if (!tx.isInTransaction()) {
+        throw new Error(
+            "handleWagerMessageInTransaction requires an active transaction",
+        );
+    }
+
+    const inboxRepository =
+        new MikroOrmInboxMessageRepository(tx);
+
+    let inbox =
+        InboxMessage.receive({
+            consumerName:
+                command.consumerName,
+
+            messageId:
+                command.messageId,
+
+            payloadHash:
+                command.payloadHash,
+
+            receivedAt:
+                new Date(),
+        });
+
+    const inserted =
+        await inboxRepository.tryInsert(
+            inbox,
+        );
+
+    const duplicateMessage =
+        !inserted;
+
+    if (!inserted) {
+        const existing =
+            await inboxRepository.findByIdentity(
+                command.consumerName,
+                command.messageId,
+            );
+
+        if (existing === null) {
+            throw new Error(
+                "Inbox conflict detected but persisted message was not found",
+            );
+        }
+
+        if (
+            existing.payloadHash !==
+            command.payloadHash
+        ) {
+            throw new InboxPayloadConflictError();
+        }
+
+        inbox = existing;
+
+        if (inbox.isProcessed()) {
+            const accepted =
+                await acceptBetInTransaction(
+                    tx,
+                    command.wager,
+                );
+
+            const transaction =
+                await processBetInTransaction(
+                    tx,
+                    accepted.transaction.id,
+                );
+
+            return {
+                transaction,
+                duplicateMessage: true,
+                idempotentReplay:
+                    accepted.idempotentReplay,
+            };
+        }
+    }
+
+    const accepted =
+        await acceptBetInTransaction(
+            tx,
+            command.wager,
+        );
+
+    const wasTerminalBeforeProcessing =
+        accepted.transaction.isTerminal();
+
+    const transaction =
+        await processBetInTransaction(
+            tx,
+            accepted.transaction.id,
+        );
+
+    const occurredAt =
+        new Date();
+
+    const event =
+        transaction.status ===
+            WagerTransactionStatus.Processed
+            ? new WagerTransactionProcessedEvent(
+                crypto.randomUUID(),
+                occurredAt,
+                transaction,
+            )
+            : transaction.status ===
+                WagerTransactionStatus.Rejected
+                ? new WagerTransactionRejectedEvent(
+                    crypto.randomUUID(),
+                    occurredAt,
+                    transaction,
+                )
+                : null;
+
+    if (
+        event !== null &&
+        !wasTerminalBeforeProcessing
+    ) {
+        const outboxRepository =
+            new MikroOrmOutboxMessageRepository(
+                tx,
+            );
+
+        const outboxMessage =
+            OutboxMessage.fromEvent(
+                event,
+                occurredAt,
+            );
+
+        await outboxRepository.insert(
+            outboxMessage,
+        );
+    }
+
+    inbox.markProcessed(
+        new Date(),
+    );
+
+    await inboxRepository.markProcessed(
+        inbox,
+    );
+
+    return {
+        transaction,
+        duplicateMessage,
+        idempotentReplay:
+            accepted.idempotentReplay,
+    };
+}
+
 export interface HandleWagerMessageCommand {
     consumerName: string;
     messageId: string;
@@ -110,7 +261,7 @@ export class HandleWagerMessageService {
                     .fork()
                     .transactional(
                         async tx =>
-                            this.executeInTransaction(
+                            handleWagerMessageInTransaction(
                                 tx,
                                 command,
                             ),
@@ -130,164 +281,5 @@ export class HandleWagerMessageService {
                 }
             }
         }
-    }
-
-    private async executeInTransaction(
-        tx: EntityManager,
-        command: HandleWagerMessageCommand,
-    ): Promise<HandleWagerMessageResult> {
-        const inboxRepository =
-            new MikroOrmInboxMessageRepository(
-                tx,
-            );
-
-        let inbox =
-            InboxMessage.receive({
-                consumerName:
-                    command.consumerName,
-
-                messageId:
-                    command.messageId,
-
-                payloadHash:
-                    command.payloadHash,
-
-                receivedAt:
-                    new Date(),
-            });
-
-        const inserted =
-            await inboxRepository.tryInsert(
-                inbox,
-            );
-
-        const duplicateMessage =
-            !inserted;
-
-        /*
-         * Se não inserimos, a PK
-         * (consumerName, messageId)
-         * já existia.
-         */
-        if (!inserted) {
-            const existing =
-                await inboxRepository.findByIdentity(
-                    command.consumerName,
-                    command.messageId,
-                );
-
-            if (existing === null) {
-                throw new Error(
-                    "Inbox conflict detected but persisted message was not found",
-                );
-            }
-
-            /*
-             * Mesmo messageId com conteúdo diferente
-             * não pode ser tratado como replay válido.
-             */
-            if (
-                existing.payloadHash !==
-                command.payloadHash
-            ) {
-                throw new InboxPayloadConflictError();
-            }
-
-            inbox = existing;
-
-            /*
-             * Se já foi completamente processada,
-             * podemos reconstruir o resultado
-             * pelas garantias idempotentes da wager.
-             */
-            if (inbox.isProcessed()) {
-                const accepted =
-                    await acceptBetInTransaction(
-                        tx,
-                        command.wager,
-                    );
-
-                const transaction =
-                    await processBetInTransaction(
-                        tx,
-                        accepted.transaction.id,
-                    );
-
-                return {
-                    transaction,
-                    duplicateMessage: true,
-                    idempotentReplay:
-                        accepted.idempotentReplay,
-                };
-            }
-        }
-
-        /*
-         * Daqui para baixo tudo acontece na
-         * MESMA transaction da Inbox.
-         */
-        const accepted =
-            await acceptBetInTransaction(
-                tx,
-                command.wager,
-            );
-
-        const transaction =
-            await processBetInTransaction(
-                tx,
-                accepted.transaction.id,
-            );
-
-        const occurredAt =
-            new Date();
-
-        const event =
-            transaction.status ===
-                WagerTransactionStatus.Processed
-                ? new WagerTransactionProcessedEvent(
-                    crypto.randomUUID(),
-                    occurredAt,
-                    transaction,
-                )
-                : transaction.status ===
-                    WagerTransactionStatus.Rejected
-                    ? new WagerTransactionRejectedEvent(
-                        crypto.randomUUID(),
-                        occurredAt,
-                        transaction,
-                    )
-                    : null;
-
-        if (event !== null) {
-            const outboxRepository =
-                new MikroOrmOutboxMessageRepository(
-                    tx,
-                );
-
-            const outboxMessage =
-                OutboxMessage.fromEvent(
-                    event,
-                    occurredAt,
-                );
-
-            await outboxRepository.insert(
-                outboxMessage,
-            );
-        }
-
-        inbox.markProcessed(
-            new Date(),
-        );
-
-        await inboxRepository.markProcessed(
-            inbox,
-        );
-
-        return {
-            transaction,
-            duplicateMessage,
-            idempotentReplay:
-                accepted.idempotentReplay,
-        };
     }
 }
