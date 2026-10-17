@@ -1,3 +1,5 @@
+import { enqueueWagerEvent } from "./enqueue-wager-event.js";
+import { MikroOrmReferenceRetryRepository, MAX_REFERENCE_ATTEMPTS, referenceRetryDelay } from "../../persistence/repositories/mikro-orm-reference-retry.repository.js";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { ConcurrencyConflictError } from "../../domain/ports/concurrency-conflict.error.js";
 import type { WagerTransactionRepository } from "../../domain/ports/wager-transaction.repository.js";
@@ -28,7 +30,8 @@ export async function processWagerInTransaction(
     tx: EntityManager,
     transactionId: string,
     repositories: WagerRepositoryFactory = createWagerRepositories,
-    allowedKinds: readonly WagerTransactionKind[] = [WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss],
+    allowedKinds: readonly WagerTransactionKind[] = [WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss, WagerTransactionKind.Refund, WagerTransactionKind.Rollback],
+    referenceRetry?: { attempts: number; now: Date },
 ): Promise<WagerTransaction> {
     if (!tx.isInTransaction()) {
         throw new Error(
@@ -42,6 +45,8 @@ export async function processWagerInTransaction(
         ledger,
     } = repositories(tx);
 
+    const referenceRepository = new MikroOrmReferenceRetryRepository(tx);
+    await referenceRepository.lockReversal(transactionId);
     const wager = await wagers.findById(
         transactionId,
     );
@@ -54,7 +59,7 @@ export async function processWagerInTransaction(
 
     if (
         !allowedKinds.includes(wager.kind) ||
-        ![WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss].includes(wager.kind)
+        ![WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss, WagerTransactionKind.Refund, WagerTransactionKind.Rollback].includes(wager.kind)
     ) {
         throw new Error(
             `Processor supports only ${allowedKinds.join("/")}`,
@@ -65,14 +70,47 @@ export async function processWagerInTransaction(
         return wager;
     }
 
-    if (
-        wager.status !==
-        WagerTransactionStatus.Pending
-    ) {
-        throw new Error(
-            "Wager must be PENDING",
-        );
+    if (wager.status === WagerTransactionStatus.PendingReference && !referenceRetry) return wager;
+    const expectedStatus = wager.status;
+    const at = referenceRetry?.now ?? new Date();
+    const attempts = referenceRetry?.attempts ?? 0;
+    let reference: WagerTransaction | undefined;
+    let referenceFailure: FailureCode | undefined;
+    if (wager.requiresReference()) {
+        reference = await wagers.findByProviderAndExternalTransactionId(
+            wager.providerId, wager.referenceExternalTransactionId!,
+        ) ?? undefined;
+        referenceFailure = reference ? wager.validateReferenceStructure(reference) : undefined;
+        const waiting = reference && !referenceFailure &&
+            [WagerTransactionStatus.Pending, WagerTransactionStatus.PendingReference].includes(reference.status);
+        // Pending references are read without locks; their own processor must be free to advance.
+        if (!reference || waiting) {
+            if (attempts < MAX_REFERENCE_ATTEMPTS) {
+                wager.markPendingReference();
+                await wagers.update(wager, expectedStatus);
+                await referenceRepository.schedule(wager.id, attempts, new Date(at.getTime() + referenceRetryDelay(attempts)));
+                if (expectedStatus !== WagerTransactionStatus.PendingReference) await enqueueWagerEvent(tx, wager, at);
+                return wager;
+            }
+            referenceFailure = reference ? FailureCode.ReferenceNotReady : FailureCode.ReferenceNotFound;
+        } else {
+            referenceFailure = wager.validateReference(reference);
+            if (!referenceFailure) {
+                await referenceRepository.lockProcessedReference(reference.id);
+                if (await referenceRepository.hasProcessedReversal(reference.id, wager.kind)) {
+                    referenceFailure = FailureCode.ReferenceAlreadyReversed;
+                }
+            }
+        }
     }
+
+    const persistDecision = async () => {
+        await wagers.update(wager, expectedStatus);
+        if (wager.requiresReference()) {
+            await referenceRepository.schedule(wager.id, attempts, null);
+            await enqueueWagerEvent(tx, wager, at);
+        }
+    };
 
     const wallet =
         await wallets.findById(
@@ -88,10 +126,7 @@ export async function processWagerInTransaction(
     const expectedVersion =
         wallet.version;
 
-    const expectedStatus =
-        wager.status;
-
-    const failureCode =
+    const failureCode = referenceFailure ?? (
         wallet.playerId !== wager.playerId
             ? FailureCode.PlayerMismatch
 
@@ -108,7 +143,8 @@ export async function processWagerInTransaction(
                     )
                         ? FailureCode.InsufficientFunds
 
-                        : undefined;
+                        : wager.requiresReference() && wager.ledgerDirectionFor(reference) === "DEBIT" && wallet.balance.isLessThan(wager.money)
+                            ? FailureCode.ReversalWouldOverdraw : undefined);
 
     if (failureCode !== undefined) {
         wager.reject(
@@ -116,10 +152,7 @@ export async function processWagerInTransaction(
             wallet.balance,
         );
 
-        await wagers.update(
-            wager,
-            expectedStatus,
-        );
+        await persistDecision();
 
         return wager;
     }
@@ -131,7 +164,7 @@ export async function processWagerInTransaction(
         return wager;
     }
 
-    const movement = wager.kind === WagerTransactionKind.Bet
+    const movement = wager.ledgerDirectionFor(reference) === "DEBIT"
         ? wallet.debit(wager.money)
         : wallet.credit(wager.money);
 
@@ -141,10 +174,8 @@ export async function processWagerInTransaction(
         );
     }
 
-    const at = new Date();
-
     wager.markProcessed(
-        undefined,
+        reference?.id,
         at,
         wallet.balance,
     );
@@ -154,10 +185,7 @@ export async function processWagerInTransaction(
      * Protege múltiplas execuções concorrentes
      * da mesma operação.
      */
-    await wagers.update(
-        wager,
-        expectedStatus,
-    );
+    await persistDecision();
 
     /*
      * Optimistic lock da wallet.
@@ -209,7 +237,7 @@ export class ProcessWagerService {
             createWagerRepositories,
 
         private readonly maxAttempts = 5,
-        private readonly allowedKinds: readonly WagerTransactionKind[] = [WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss],
+        private readonly allowedKinds: readonly WagerTransactionKind[] = [WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss, WagerTransactionKind.Refund, WagerTransactionKind.Rollback],
     ) {
         if (
             !Number.isInteger(maxAttempts) ||

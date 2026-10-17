@@ -26,6 +26,8 @@ export interface WagerTransactionRow {
 
     createdAt: Date;
     processedAt?: Date;
+    referenceAttempts?: number;
+    referenceNextAttemptAt?: Date;
     observedBalance?: string;
     observedCurrency?: string;
 }
@@ -36,6 +38,8 @@ export const WagerTransactionEntity =
         tableName: "wager_transactions",
 
         properties: {
+            referenceAttempts: { type: "integer", fieldName: "reference_attempts", default: 0 },
+            referenceNextAttemptAt: { type: "datetime", fieldName: "reference_next_attempt_at", nullable: true },
             observedBalance: { type: "decimal", precision: 18, scale: 2, fieldName: "observed_balance", nullable: true },
             observedCurrency: { type: "string", length: 3, fieldName: "observed_currency", nullable: true },
             id: {

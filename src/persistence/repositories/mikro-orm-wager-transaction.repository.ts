@@ -27,6 +27,7 @@ export class MikroOrmWagerTransactionRepository
         const row = await this.em.findOne(
             WagerTransactionEntity,
             { id },
+            { refresh: true },
         );
 
         return row === null

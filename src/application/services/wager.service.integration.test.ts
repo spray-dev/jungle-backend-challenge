@@ -163,9 +163,9 @@ it("LOSS does not call wallet update or ledger insert", async () => {
 });
 
 for (const kind of [Kind.Opening, Kind.Refund, Kind.Rollback]) {
-    it(`does not admit ${kind}`, async () => {
+    it(`does not admit ${kind} without required external input`, async () => {
         const command = await input("WIN");
-        await expect(new AcceptWagerService(orm.em.fork()).execute({ ...command, kind: kind as AcceptWagerCommand["kind"] })).rejects.toThrow("Only BET/WIN/LOSS");
+        await expect(new AcceptWagerService(orm.em.fork()).execute({ ...command, kind: kind as AcceptWagerCommand["kind"] })).rejects.toThrow(kind === Kind.Opening ? "Only BET/WIN/LOSS" : "referenceExternalTransactionId");
     });
 }
 

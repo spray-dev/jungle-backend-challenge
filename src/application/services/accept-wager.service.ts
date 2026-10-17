@@ -5,7 +5,7 @@ import { Money, type MoneyProps } from "../../domain/money.js";
 import { WagerTransaction, WagerTransactionKind } from "../../domain/wager-transaction.js";
 import { MikroOrmWagerTransactionRepository } from "../../persistence/repositories/mikro-orm-wager-transaction.repository.js";
 
-export type SupportedWagerKind = "BET" | "WIN" | "LOSS";
+export type SupportedWagerKind = "BET" | "WIN" | "LOSS" | "REFUND" | "ROLLBACK";
 
 export interface AcceptWagerCommand {
     kind: SupportedWagerKind;
@@ -60,8 +60,14 @@ export async function acceptWagerInTransaction(
         }
     }
 
-    if (!["BET", "WIN", "LOSS"].includes(command.kind)) {
-        throw new Error("Only BET/WIN/LOSS are supported");
+    if (!["BET", "WIN", "LOSS", "REFUND", "ROLLBACK"].includes(command.kind)) {
+        throw new Error("Only BET/WIN/LOSS/REFUND/ROLLBACK are supported");
+    }
+
+    const reference = command.referenceExternalTransactionId;
+    if ((reference !== undefined && (typeof reference !== "string" || !reference.trim() || reference.length > 255)) ||
+        (["REFUND", "ROLLBACK"].includes(command.kind) && reference === undefined)) {
+        throw new Error("Invalid or missing referenceExternalTransactionId");
     }
 
     const money =

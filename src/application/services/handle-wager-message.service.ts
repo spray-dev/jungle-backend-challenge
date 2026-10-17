@@ -4,7 +4,6 @@ import { InboxMessage } from "../../domain/inbox-message.js";
 import { ConcurrencyConflictError } from "../../domain/ports/concurrency-conflict.error.js";
 
 import {
-    WagerTransactionStatus,
     type WagerTransaction,
 } from "../../domain/wager-transaction.js";
 
@@ -19,21 +18,7 @@ import {
     processWagerInTransaction,
 } from "./process-wager.service.js";
 
-import {
-    OutboxMessage,
-} from "../../domain/outbox-message.js";
-
-import {
-    WagerTransactionProcessedEvent,
-} from "../../domain/events/wager-transaction-processed.event.js";
-
-import {
-    WagerTransactionRejectedEvent,
-} from "../../domain/events/wager-transaction-rejected.event.js";
-
-import {
-    MikroOrmOutboxMessageRepository,
-} from "../../persistence/repositories/mikro-orm-outbox-message.repository.js";
+import { enqueueWagerEvent } from "./enqueue-wager-event.js";
 
 export async function handleWagerMessageInTransaction(
     tx: EntityManager,
@@ -130,44 +115,10 @@ export async function handleWagerMessageInTransaction(
             accepted.transaction.id,
         );
 
-    const occurredAt =
-        new Date();
-
-    const event =
-        transaction.status ===
-            WagerTransactionStatus.Processed
-            ? new WagerTransactionProcessedEvent(
-                crypto.randomUUID(),
-                occurredAt,
-                transaction,
-            )
-            : transaction.status ===
-                WagerTransactionStatus.Rejected
-                ? new WagerTransactionRejectedEvent(
-                    crypto.randomUUID(),
-                    occurredAt,
-                    transaction,
-                )
-                : null;
-
-    if (
-        event !== null &&
-        !wasTerminalBeforeProcessing
-    ) {
-        const outboxRepository =
-            new MikroOrmOutboxMessageRepository(
-                tx,
-            );
-
-        const outboxMessage =
-            OutboxMessage.fromEvent(
-                event,
-                occurredAt,
-            );
-
-        await outboxRepository.insert(
-            outboxMessage,
-        );
+    // Reversals enqueue inside the processor so scheduled retries and direct calls
+    // share the same atomic event path. Existing BET/WIN/LOSS messaging stays here.
+    if (!transaction.requiresReference() && !wasTerminalBeforeProcessing) {
+        await enqueueWagerEvent(tx, transaction, new Date());
     }
 
     inbox.markProcessed(

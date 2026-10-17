@@ -36,7 +36,7 @@ export interface WagerTransactionRequestedMessage {
         roundId: string;
         gameId: string;
 
-        kind: "BET" | "WIN" | "LOSS";
+        kind: "BET" | "WIN" | "LOSS" | "REFUND" | "ROLLBACK";
         referenceExternalTransactionId?: string;
 
         money: {
@@ -356,14 +356,15 @@ export class WagerSqsConsumer {
             }
         }
 
-        if (data.kind !== "BET" && data.kind !== "WIN" && data.kind !== "LOSS") {
+        if (data.kind !== "BET" && data.kind !== "WIN" && data.kind !== "LOSS" && data.kind !== "REFUND" && data.kind !== "ROLLBACK") {
             throw new InvalidWagerMessageError(
-                "Only BET/WIN/LOSS are currently supported",
+                "Only BET/WIN/LOSS/REFUND/ROLLBACK are supported",
             );
         }
 
-        if (data.referenceExternalTransactionId !== undefined &&
-            typeof data.referenceExternalTransactionId !== "string") {
+        if (((data.kind === "REFUND" || data.kind === "ROLLBACK") && data.referenceExternalTransactionId === undefined) ||
+            (data.referenceExternalTransactionId !== undefined &&
+                (typeof data.referenceExternalTransactionId !== "string" || !data.referenceExternalTransactionId.trim() || data.referenceExternalTransactionId.length > 255))) {
             throw new InvalidWagerMessageError("Invalid referenceExternalTransactionId");
         }
 

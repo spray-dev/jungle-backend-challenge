@@ -24,6 +24,8 @@ export enum FailureCode {
     InvalidAmount = "INVALID_AMOUNT",
     InsufficientFunds = "INSUFFICIENT_FUNDS",
     ReferenceNotFound = "REFERENCE_NOT_FOUND",
+    ReferenceNotReady = "REFERENCE_NOT_READY",
+    ReferenceAlreadyReversed = "REFERENCE_ALREADY_REVERSED",
     InvalidReference = "INVALID_REFERENCE",
     ReversalWouldOverdraw = "REVERSAL_WOULD_OVERDRAW",
     IdempotencyConflict = "IDEMPOTENCY_CONFLICT",
@@ -86,7 +88,7 @@ export class WagerTransaction {
 
         if (
             requiresReference &&
-            !props.referenceExternalTransactionId
+            !props.referenceExternalTransactionId?.trim()
         ) {
             throw new Error(
                 `${props.kind} requires a reference transaction`,
@@ -218,6 +220,26 @@ export class WagerTransaction {
 
         this._status = WagerTransactionStatus.Failed;
         this._failureCode = code;
+    }
+
+    validateReference(reference: WagerTransaction): FailureCode | undefined {
+        return this.validateReferenceStructure(reference) ?? (reference.status === WagerTransactionStatus.Processed
+            ? undefined : FailureCode.InvalidReference);
+    }
+
+    validateReferenceStructure(reference: WagerTransaction): FailureCode | undefined {
+        const allowed = this.kind === WagerTransactionKind.Refund
+            ? [WagerTransactionKind.Bet]
+            : [WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Refund];
+        if (!this.requiresReference() || reference.id === this.id ||
+            reference.providerId !== this.providerId || reference.playerId !== this.playerId ||
+            reference.walletId !== this.walletId || reference.roundId !== this.roundId ||
+            reference.externalTransactionId !== this.referenceExternalTransactionId ||
+            reference.money.currency !== this.money.currency || !reference.money.equals(this.money) ||
+            !allowed.includes(reference.kind)) {
+            return FailureCode.InvalidReference;
+        }
+        return undefined;
     }
 
     ledgerDirectionFor(

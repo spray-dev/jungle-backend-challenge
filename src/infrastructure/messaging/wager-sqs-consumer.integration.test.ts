@@ -856,3 +856,65 @@ it("SQS rejects a non-string WIN reference before admission", async () => {
         expect(await orm.em.getConnection().execute("select id from wager_transactions where external_transaction_id = ?", [id])).toHaveLength(0);
     } finally { await client.send(new DeleteQueueCommand({ QueueUrl: url })); }
 });
+
+for (const kind of ["REFUND", "ROLLBACK"] as const) {
+    it(`SQS ${kind} before BET: ack pending, reference delivery, retry and replay without duplication`, async () => {
+        const { RetryPendingReferenceService } = await import("../../application/services/retry-pending-reference.service.js");
+        const id = crypto.randomUUID();
+        const queue = await client.send(new CreateQueueCommand({ QueueName: `reversal-${id}.fifo`, Attributes: { FifoQueue: "true" } }));
+        const url = queue.QueueUrl!;
+        try {
+            await new MikroOrmWalletRepository(orm.em.fork()).create(Wallet.open({ id, playerId: id, initialBalance: Money.zero("BRL") }));
+            const base = { providerId: id, playerId: id, walletId: id, roundId: "round", gameId: "game", money: { amount: "20.00", currency: "BRL" } };
+            const reversal = { ...base, kind, externalTransactionId: `${id}-reverse`, idempotencyKey: `${id}-reverse`, referenceExternalTransactionId: `${id}-bet` };
+            const consumer = new WagerSqsConsumer(client, url, orm.em.fork());
+            async function send(data: Record<string, unknown>) {
+                const messageId = crypto.randomUUID();
+                await client.send(new SendMessageCommand({ QueueUrl: url, MessageGroupId: id, MessageDeduplicationId: messageId,
+                    MessageBody: JSON.stringify({ messageId, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(), data }),
+                }));
+                expect(await consumer.pollOnce()).toBe("ACKED");
+            }
+            await send(reversal);
+            await send(reversal);
+            const [pending] = await orm.em.getConnection().execute("select * from wager_transactions where external_transaction_id = ?", [reversal.externalTransactionId]);
+            expect(pending?.status).toBe("PENDING_REFERENCE");
+            expect(pending?.reference_attempts).toBe(0);
+            expect(await orm.em.getConnection().execute("select id from wallet_ledger_entries where wallet_id = ?", [id])).toHaveLength(0);
+            await send({ ...base, kind: "WIN", externalTransactionId: `${id}-seed`, idempotencyKey: `${id}-seed` });
+            await send({ ...base, kind: "BET", externalTransactionId: `${id}-bet`, idempotencyKey: `${id}-bet` });
+            expect(await new RetryPendingReferenceService(orm.em).retryPending(10, new Date(Date.now() + 120_000))).toBe(1);
+            await send(reversal);
+            const [wallet] = await orm.em.getConnection().execute("select balance from wallets where id = ?", [id]);
+            const [ledger] = await orm.em.getConnection().execute(`select count(*)::int as entries,
+                sum(case when direction = 'CREDIT' then amount else -amount end)::numeric(18,2)::text as balance
+                from wallet_ledger_entries where wallet_id = ?`, [id]);
+            expect(wallet?.balance).toBe("20.00");
+            expect(ledger?.balance).toBe(wallet?.balance);
+            expect(ledger?.entries).toBe(3);
+            const events = await orm.em.getConnection().execute("select event_type from outbox_messages where payload->'data'->>'externalTransactionId' = ? order by created_at", [reversal.externalTransactionId]);
+            expect(events).toEqual([{ event_type: "WagerTransactionPendingReference" }, { event_type: "WagerTransactionProcessed" }]);
+            const remaining = await client.send(new ReceiveMessageCommand({ QueueUrl: url, WaitTimeSeconds: 1 }));
+            expect(remaining.Messages ?? []).toHaveLength(0);
+        } finally { await client.send(new DeleteQueueCommand({ QueueUrl: url })); }
+    });
+}
+
+for (const [kind, reference] of [["OPENING", "some-id"], ["REFUND", undefined], ["ROLLBACK", "   "]] as const) {
+    it(`SQS rejects external ${kind} with invalid input before creating inbox or wager`, async () => {
+        const id = crypto.randomUUID();
+        const queue = await client.send(new CreateQueueCommand({ QueueName: `invalid-reversal-${id}.fifo`, Attributes: { FifoQueue: "true" } }));
+        const url = queue.QueueUrl!;
+        try {
+            await client.send(new SendMessageCommand({ QueueUrl: url, MessageGroupId: id, MessageDeduplicationId: id,
+                MessageBody: JSON.stringify({ messageId: id, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(),
+                    data: { providerId: id, playerId: id, walletId: id, roundId: id, gameId: id,
+                        externalTransactionId: id, idempotencyKey: id, kind, referenceExternalTransactionId: reference,
+                        money: { amount: "20.00", currency: "BRL" } } }),
+            }));
+            expect(await new WagerSqsConsumer(client, url, orm.em.fork()).pollOnce()).toBe("PERMANENT_FAILURE");
+            expect(await orm.em.getConnection().execute("select id from wager_transactions where external_transaction_id = ?", [id])).toHaveLength(0);
+            expect(await orm.em.getConnection().execute("select message_id from inbox_messages where message_id = ?", [id])).toHaveLength(0);
+        } finally { await client.send(new DeleteQueueCommand({ QueueUrl: url })); }
+    });
+}
