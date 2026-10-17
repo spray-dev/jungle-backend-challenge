@@ -49,7 +49,8 @@ it('HTTP opening persists wallet, processed OPENING, exactly one credit, version
     expect(ledger.data.items[0]).toMatchObject({ direction: 'CREDIT', balanceBefore: '0.00', balanceAfter: '100.00' });
     expect((await request(`/wallets/${w.id}`)).data).toEqual(w);
     const events = await orm.em.execute("select * from outbox_messages where payload->'data'->>'transactionId' = ?", [rows[0]!.id]);
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
+    expect(events.map((e: any) => e.event_type).sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
 });
 it('opening rolls back all records if the SQL transaction fails', async () => {
     const player = crypto.randomUUID();
@@ -110,4 +111,47 @@ it('readiness checks real PostgreSQL and MiniStack; liveness remains independent
     if (original === undefined) delete process.env.SQS_ENDPOINT; else process.env.SQS_ENDPOINT = original;
     try { await expect(unavailable.ready()).rejects.toMatchObject({ status: 503 }); }
     finally { unavailable.onModuleDestroy(); }
+});
+
+it('official HTTP aliases preserve lookup, reconciliation and error contracts', async () => {
+    const w = await wallet(), command = wager(w);
+    await request('/wagering/transactions', command, crypto.randomUUID());
+    expect(await request('/providers/http-test/wagering/transactions/' + command.externalTransactionId))
+        .toEqual(await request('/wagering/transactions/provider/http-test/external/' + command.externalTransactionId));
+    expect(await request('/wallets/' + w.id + '/reconciliation', {}))
+        .toEqual(await request('/wallets/' + w.id + '/reconciliation'));
+    expect((await request('/providers/http-test/wagering/transactions/missing')).status).toBe(404);
+    expect((await request('/wallets/' + crypto.randomUUID() + '/reconciliation', {})).status).toBe(404);
+    expect((await request('/wallets/invalid/reconciliation', {})).status).toBe(400);
+});
+
+it('balance events are atomic and exactly once for OPENING/BET/WIN/REFUND/ROLLBACK, absent for LOSS/rejection/replay', async () => {
+    const w = await wallet();
+    const bet = wager(w), betKey = crypto.randomUUID();
+    const first = await request('/wagering/transactions', bet, betKey);
+    await request('/wagering/transactions', bet, betKey);
+    await request('/wagering/transactions', wager(w, { kind: 'WIN' }), crypto.randomUUID());
+    const refund = wager(w, { kind: 'REFUND', referenceExternalTransactionId: bet.externalTransactionId });
+    await request('/wagering/transactions', refund, crypto.randomUUID());
+    await request('/wagering/transactions', wager(w, { kind: 'ROLLBACK', referenceExternalTransactionId: refund.externalTransactionId }), crypto.randomUUID());
+    await request('/wagering/transactions', wager(w, { kind: 'LOSS' }), crypto.randomUUID());
+    await request('/wagering/transactions', wager(w, { money: { amount: '999.00', currency: 'BRL' } }), crypto.randomUUID());
+    const events = await orm.em.execute("select payload from outbox_messages where event_type = 'WalletBalanceChanged' and payload->'data'->>'walletId' = ? order by (payload->'data'->>'walletVersion')::int", [w.id]);
+    expect(events).toHaveLength(5);
+    expect(events.map((e: any) => e.payload.data.walletVersion)).toEqual([1, 2, 3, 4, 5]);
+    expect(events.map((e: any) => e.payload.data.direction)).toEqual(['CREDIT', 'DEBIT', 'CREDIT', 'CREDIT', 'DEBIT']);
+    expect(events.map((e: any) => e.payload.data.balanceAfter.amount)).toEqual(['100.00', '75.00', '100.00', '125.00', '100.00']);
+    expect(events[1]!.payload.data).toEqual({ walletId: w.id, transactionId: first.data.transactionId,
+        direction: 'DEBIT', money: { amount: '25.00', currency: 'BRL' },
+        balanceBefore: { amount: '100.00', currency: 'BRL' }, balanceAfter: { amount: '75.00', currency: 'BRL' }, walletVersion: 2 });
+    expect(new Set(events.map((e: any) => e.payload.data.transactionId)).size).toBe(5);
+});
+
+it('readiness rejects a configured queue that does not exist', async () => {
+    const original = process.env.WAGER_SQS_QUEUE_URL;
+    process.env.WAGER_SQS_QUEUE_URL = 'http://localhost:4566/000000000000/missing-' + crypto.randomUUID() + '.fifo';
+    const health = new HealthController(orm);
+    if (original === undefined) delete process.env.WAGER_SQS_QUEUE_URL; else process.env.WAGER_SQS_QUEUE_URL = original;
+    try { await expect(health.ready()).rejects.toMatchObject({ status: 503 }); }
+    finally { health.onModuleDestroy(); }
 });

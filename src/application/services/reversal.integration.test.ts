@@ -51,7 +51,10 @@ async function row(id: string) {
     return found;
 }
 async function events(id: string) {
-    return sql("select event_type from outbox_messages where payload->'data'->>'transactionId' = ? order by created_at, id", [id]);
+    const all = await sql("select event_type from outbox_messages where payload->'data'->>'transactionId' = ? order by created_at, id", [id]);
+    const transaction = await row(id);
+    expect(all.filter((e: any) => e.event_type === 'WalletBalanceChanged')).toHaveLength(transaction.status === Status.Processed ? 1 : 0);
+    return all.filter((e: any) => e.event_type !== 'WalletBalanceChanged');
 }
 
 for (const [kind, referenceKind, finalBalance] of [

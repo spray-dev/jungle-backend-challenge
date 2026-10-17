@@ -16,13 +16,28 @@ bun install --frozen-lockfile
 bun run typecheck
 bun run build
 bun run db:migration:up
+bun run sqs:provision
+# Configure as URLs impressas no .env antes de iniciar os workers.
 bun run start
 ```
 
 Aguarde PostgreSQL ficar healthy antes da migration (`docker compose ps`). O CLI usa
 `dist`, portanto **build vem antes de migration**. Para desenvolvimento: `bun run start:dev`.
-O Compose sobe PostgreSQL 16 e MiniStack, sem provisionar filas da aplicação.
-A API HTTP funciona sem filas provisionadas; eventos ficam persistidos na Outbox.
+O Compose sobe PostgreSQL 16 e MiniStack. Execute `bun run sqs:provision` para criar
+idempotentemente `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e
+`wager-events.fifo`, usando o SDK (sem AWS CLI). A entrada tem visibility de 60s e
+redrive para DLQ após 5 recebimentos. O script pode ser executado novamente.
+Copie as duas linhas de URLs impressas para `.env`:
+
+```dotenv
+WAGER_SQS_QUEUE_URL=http://localhost:4566/000000000000/wager-transactions.fifo
+WAGER_SQS_EVENTS_QUEUE_URL=http://localhost:4566/000000000000/wager-events.fifo
+```
+
+Esses são exemplos do MiniStack padrão; use as URLs efetivamente retornadas.
+Sem a URL correspondente, cada worker fica desativado com aviso `worker_disabled`.
+A API HTTP continua disponível, e eventos permanecem na Outbox até ativar o publisher.
+URL configurada mas indisponível causa retry no worker e falha em readiness, sem encerrar HTTP.
 
 Defaults locais estão em [.env.example](.env.example). Não é necessário criar `.env`
 para o Compose padrão. Para personalizar, copie o exemplo para `.env` (Bun carrega-o)
@@ -36,7 +51,9 @@ ou exporte as variáveis. Não reutilize as credenciais de demonstração em pro
 | WAGER_DB_USER | wagering | Usuário PostgreSQL |
 | WAGER_DB_PASSWORD | wagering_dev | Senha de demonstração |
 | WAGER_DB_NAME | wagering | Banco da aplicação |
-| SQS_ENDPOINT | http://localhost:4566 | Endpoint de readiness |
+| SQS_ENDPOINT | http://localhost:4566 | Endpoint SQS de runtime, provisioning e readiness |
+| WAGER_SQS_QUEUE_URL | vazio | Fila de entrada; vazio desativa consumer |
+| WAGER_SQS_EVENTS_QUEUE_URL | vazio | Fila de eventos; vazio desativa publisher |
 | AWS_REGION | us-east-1 | Região SQS |
 | AWS_ACCESS_KEY_ID | test | Credencial local MiniStack |
 | AWS_SECRET_ACCESS_KEY | test | Credencial local MiniStack |
@@ -58,9 +75,11 @@ não vazias, até 255 caracteres. OPENING é exclusivamente interno.
 | GET | /wallets/:id | Saldo e versão |
 | GET | /wallets/:id/ledger?limit=50&cursor=... | Ledger paginado |
 | GET | /wallets/:id/reconciliation | Comparação de saldo e ledger |
+| POST | /wallets/:walletId/reconciliation | Alias oficial; 200, mesma consulta sem mutação |
 | POST | /wagering/transactions | Processamento síncrono/idempotente |
 | GET | /wagering/transactions/:id | Decisão persistida |
 | GET | /wagering/transactions/provider/:providerId/external/:externalTransactionId | Busca pela identidade externa |
+| GET | /providers/:providerId/wagering/transactions/:externalTransactionId | Alias oficial da busca externa |
 | GET | /health/live | Processo vivo |
 | GET | /health/ready | PostgreSQL + SQS alcançáveis |
 
@@ -132,7 +151,8 @@ LOSS não movimenta saldo. Idempotency-Key vem exclusivamente do header.
 Replay retorna a decisão e saldo observado originais, não o saldo atual da wallet.
 Operação antes pendente pode evoluir após o worker encontrar a referência.
 Readiness retorna `ready` ou 503 `not_ready`, com flags `postgres` e `sqs`.
-Usa SELECT 1 e ListQueues; não cria recursos nem garante existência de filas/DLQ.
+Usa SELECT 1 e GetQueueAttributes para cada URL configurada; sem URLs, usa ListQueues.
+Não cria recursos e não verifica a configuração de redrive/DLQ em readiness.
 
 ## Testes e SQS/MiniStack
 
@@ -157,11 +177,22 @@ bun test src/http/http.integration.test.ts
 ```
 
 Os testes provisionam as próprias filas FIFO e redrive policy e fazem limpeza.
-**Consumer SQS e publisher Outbox não iniciam automaticamente em `bun run start`.**
-Os componentes existentes expõem `WagerSqsConsumer.pollOnce()` e
-`OutboxPublisherService.publishPending()`. Falta conectá-los a loops de lifecycle com
-filas/URLs configuradas, DLQ e shutdown coordenado. Os eventos permanecem na Outbox
-até publicação explícita. Apenas PendingReferenceWorker já inicia automaticamente.
+Com URLs configuradas, **WagerSqsWorker e OutboxPublisherWorker iniciam automaticamente**
+em `bun run start`, junto ao PendingReferenceWorker. O consumer faz long polling de 1s,
+com 100ms entre iterações; o publisher publica lotes de até 10, com 1s entre iterações.
+Cada loop agenda somente depois da conclusão anterior, sem sobreposição local. As
+garantias entre instâncias continuam no PostgreSQL (Inbox/idempotência e SKIP LOCKED).
+Falhas geram logs estruturados mínimos, sem corpo financeiro; falhas de publicação
+mantêm o backoff persistido da Outbox. A publicação continua at-least-once.
+
+SIGTERM/SIGINT acionam hooks do Nest: os workers cancelam timers, aguardam a iteração
+ativa e só depois fecham seus clientes SQS. Requisições SDK têm timeouts e retries
+limitados; o shutdown aguarda também o trabalho de banco ativo. Não há teste de kill real.
+
+WalletBalanceChanged é persistido na mesma transação de OPENING/BET/WIN/REFUND/ROLLBACK,
+com walletId, transactionId, direction, money, balanceBefore, balanceAfter e walletVersion.
+LOSS, rejeição e replay não geram outro evento de saldo. O evento de decisão existente
+continua sendo emitido separadamente. Nenhuma migration foi necessária.
 
 ## Garantias e tradeoffs
 
@@ -184,11 +215,14 @@ nos controllers validando JWT/JWKS/issuer/audience, providerId vinculado ao prin
 e autorização por wallet; health público e SQS interno protegido por IAM. Nenhum
 IdP/guard foi implementado. Não exponha esta demonstração sem essa camada.
 
-Também ficam pendentes: lifecycle automático do consumer/publisher, WalletBalanceChanged,
-envelope completo correlation/causation, métricas e logs estruturados abrangentes,
+Também ficam pendentes: envelope completo eventId/eventType/aggregateId/correlationId/causationId
+(o contrato de entrada/saída mantém messageId/type/version/occurredAt/data), métricas e logs estruturados abrangentes,
 alertas automáticos de reconciliação, teste com três processos reais e kill depois
 do commit/antes do ACK. A concorrência existente usa conexões/instâncias ORM reais
 no mesmo processo. A janela de referência (~31s + polling) é curta para produção.
 Overflow do saldo no numeric(18,2) causa rollback e erro técnico; não há taxonomia
 HTTP específica para esse limite. Não há frontend. Nenhuma migration foi gerada
 para esta entrega HTTP; todas as proteções financeiras existentes foram preservadas.
+
+Operações/comparações entre moedas diferentes são inválidas; Money.equals lança erro de currency mismatch, assim como add/subtract/isLessThan.
+Isso diverge da regra geral de conflito de moeda do enunciado para equals; preservado nesta entrega sem alteração de domínio.

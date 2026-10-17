@@ -561,6 +561,23 @@
           "enumItems": [],
           "mappedType": "string"
         },
+        "reference_attempts": {
+          "name": "reference_attempts",
+          "type": "int",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "0",
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
         "reference_external_transaction_id": {
           "name": "reference_external_transaction_id",
           "type": "varchar(255)",
@@ -578,6 +595,23 @@
           "enumItems": [],
           "mappedType": "string"
         },
+        "reference_next_attempt_at": {
+          "name": "reference_next_attempt_at",
+          "type": "timestamptz(6)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
         "reference_transaction_id": {
           "name": "reference_transaction_id",
           "type": "uuid",
@@ -585,7 +619,7 @@
           "autoincrement": false,
           "primary": false,
           "nullable": true,
-          "unique": false,
+          "unique": true,
           "length": null,
           "precision": null,
           "scale": null,
@@ -656,6 +690,30 @@
       "indexes": [
         {
           "columnNames": [
+            "reference_transaction_id",
+            "kind"
+          ],
+          "composite": true,
+          "constraint": false,
+          "keyName": "wager_processed_reversal_unique",
+          "primary": false,
+          "unique": true,
+          "where": "((status)::text = 'PROCESSED'::text) AND ((kind)::text = ANY ((ARRAY['REFUND'::character varying, 'ROLLBACK'::character varying])::text[]))"
+        },
+        {
+          "columnNames": [
+            "reference_next_attempt_at",
+            "id"
+          ],
+          "composite": true,
+          "constraint": false,
+          "keyName": "wager_reference_due_idx",
+          "primary": false,
+          "unique": false,
+          "where": "(status)::text = 'PENDING_REFERENCE'::text"
+        },
+        {
+          "columnNames": [
             "id",
             "wallet_id"
           ],
@@ -704,6 +762,18 @@
           "expression": "((observed_balance IS NULL) AND (observed_currency IS NULL)) OR ((observed_balance IS NOT NULL) AND (observed_currency IS NOT NULL) AND (observed_balance >= 0) AND (observed_currency ~ '^[A-Z]{3}$'::text))",
           "definition": "CHECK ((((observed_balance IS NULL) AND (observed_currency IS NULL)) OR ((observed_balance IS NOT NULL) AND (observed_currency IS NOT NULL) AND (observed_balance >= (0)::numeric) AND ((observed_currency)::text ~ '^[A-Z]{3}$'::text))))",
           "columnName": "observed_balance"
+        },
+        {
+          "name": "wager_processed_reversal_reference",
+          "expression": "(kind <> ALL (ARRAY['REFUND'::character varying, 'ROLLBACK'::character varying])) OR (status <> 'PROCESSED'::text) OR (reference_transaction_id IS NOT NULL)",
+          "definition": "CHECK ((((kind)::text <> ALL ((ARRAY['REFUND'::character varying, 'ROLLBACK'::character varying])::text[])) OR ((status)::text <> 'PROCESSED'::text) OR (reference_transaction_id IS NOT NULL)))",
+          "columnName": "kind"
+        },
+        {
+          "name": "wager_reference_attempts_valid",
+          "expression": "(reference_attempts >= 0) AND (reference_attempts <= 5)",
+          "definition": "CHECK (((reference_attempts >= 0) AND (reference_attempts <= 5)))",
+          "columnName": "reference_attempts"
         },
         {
           "name": "wager_transactions_amount_nonnegative",

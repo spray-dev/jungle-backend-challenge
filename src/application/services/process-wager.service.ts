@@ -1,3 +1,4 @@
+import { enqueueBalanceEvent } from './enqueue-balance-event.js';
 import { enqueueWagerEvent } from "./enqueue-wager-event.js";
 import { MikroOrmReferenceRetryRepository, MAX_REFERENCE_ATTEMPTS, referenceRetryDelay } from "../../persistence/repositories/mikro-orm-reference-retry.repository.js";
 import { EntityManager } from "@mikro-orm/postgresql";
@@ -223,6 +224,8 @@ export async function processWagerInTransaction(
                 at,
         }),
     );
+
+    await enqueueBalanceEvent(tx, wager.id, movement, at);
 
     return wager;
 }

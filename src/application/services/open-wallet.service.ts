@@ -1,3 +1,4 @@
+import { enqueueBalanceEvent } from './enqueue-balance-event.js';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { Money } from '../../domain/money.js';
 import { Wallet } from '../../domain/wallet.js';
@@ -26,5 +27,7 @@ export async function openWalletInTransaction(tx: EntityManager, playerId: strin
         createdAt: wallet.createdAt,
     }));
     await enqueueWagerEvent(tx, opening, wallet.createdAt);
+    await enqueueBalanceEvent(tx, id, { walletId: wallet.id, direction: 'CREDIT', money: initialBalance,
+        balanceBefore: Money.zero(wallet.currency), balanceAfter: initialBalance, walletVersion: wallet.version }, wallet.createdAt);
     return wallet;
 }

@@ -20,7 +20,8 @@
     "test": "bun test",
     "db:migration:create": "mikro-orm migration:create",
     "db:migration:up": "mikro-orm migration:up",
-    "db:migration:down": "mikro-orm migration:down"
+    "db:migration:down": "mikro-orm migration:down",
+    "sqs:provision": "bun src/infrastructure/messaging/provision-sqs.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1152.0",

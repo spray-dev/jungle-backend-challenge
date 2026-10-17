@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Query, BadRequestException, ConflictException } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Query, BadRequestException, ConflictException, HttpCode } from '@nestjs/common';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Decimal } from 'decimal.js';
 import { UniqueConstraintViolationException } from '@mikro-orm/core';
@@ -53,6 +53,9 @@ export class WalletController {
                 nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ walletId: id, time: last.cursor_time, id: last.id })).toString('base64url') : null };
         });
     }
+    @Post(':walletId/reconciliation')
+    @HttpCode(200)
+    reconcile(@Param('walletId') id: string) { return this.reconciliation(id); }
     @Get(':id/reconciliation')
     reconciliation(@Param('id') id: string) {
         uuid(id);

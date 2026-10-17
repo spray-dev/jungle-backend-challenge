@@ -806,8 +806,10 @@ for (const kind of ["WIN", "LOSS"] as const) {
         expect(wagers).toHaveLength(1);
         expect(wagers[0]).toMatchObject({ kind, status: "PROCESSED" });
         const events = await orm.em.getConnection().execute("select * from outbox_messages where payload->'data'->>'walletId' = ?", [walletId]);
-        expect(events).toHaveLength(1);
-        expect(events[0]?.payload.data.kind).toBe(kind);
+        expect(events).toHaveLength(kind === 'WIN' ? 2 : 1);
+        expect(events.filter((e: any) => e.event_type === 'WalletBalanceChanged')).toHaveLength(kind === 'WIN' ? 1 : 0);
+        expect(events.filter((e: any) => e.event_type === 'WagerTransactionProcessed')).toHaveLength(1);
+        expect(events.find((e: any) => e.event_type === 'WagerTransactionProcessed')?.payload.data.kind).toBe(kind);
     });
 }
 

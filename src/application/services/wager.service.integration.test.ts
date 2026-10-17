@@ -57,8 +57,10 @@ for (const kind of ["WIN", "LOSS"] as const) {
             expect(ledger[0]).toMatchObject({ direction: "CREDIT", amount: "200.00", balance_before: "100.00", balance_after: "300.00", transaction_id: original.id });
         }
         const events = await orm.em.getConnection().execute("select * from outbox_messages where payload->'data'->>'transactionId' = ?", [original.id]);
-        expect(events).toHaveLength(1);
-        expect(events[0]?.payload.data).toMatchObject({ kind, balance: { amount: balance, currency: "BRL" } });
+        expect(events).toHaveLength(kind === 'WIN' ? 2 : 1);
+        expect(events.filter((e: any) => e.event_type === 'WalletBalanceChanged')).toHaveLength(kind === 'WIN' ? 1 : 0);
+        expect(events.filter((e: any) => e.event_type === 'WagerTransactionProcessed')).toHaveLength(1);
+        expect(events.find((e: any) => e.event_type === 'WagerTransactionProcessed')?.payload.data).toMatchObject({ kind, balance: { amount: balance, currency: "BRL" } });
         expect((await rows("inbox_messages", "message_id", envelope.messageId))[0]?.processed_at).not.toBeNull();
         const another = { ...command, kind: "BET" as const, externalTransactionId: crypto.randomUUID(), idempotencyKey: crypto.randomUUID(), money: { amount: "20.00", currency: "BRL" } };
         await new HandleWagerMessageService(orm.em.fork()).execute(message(another));

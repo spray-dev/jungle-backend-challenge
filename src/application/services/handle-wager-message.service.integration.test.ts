@@ -290,8 +290,8 @@ it("replays the same message without debiting twice", async () => {
                 ],
             );
 
-    expect(outboxRows)
-        .toHaveLength(1);
+    expect(outboxRows).toHaveLength(2);
+    expect(outboxRows.map((e: any) => e.event_type).sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
 });
 
 it("rejects the same message identity with a different payload hash", async () => {
@@ -618,7 +618,7 @@ it("does not create a second outbox event for the same financial operation", asy
             .getConnection()
             .execute(
                 `
-                    select id
+                    select id, event_type
                     from outbox_messages
                     where payload
                         -> 'data'
@@ -629,8 +629,8 @@ it("does not create a second outbox event for the same financial operation", asy
                 ],
             );
 
-    expect(outboxRows)
-        .toHaveLength(1);
+    expect(outboxRows).toHaveLength(2);
+    expect(outboxRows.map((e: any) => e.event_type).sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
 
     const inboxRows =
         await orm.em

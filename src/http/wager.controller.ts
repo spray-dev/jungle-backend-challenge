@@ -15,10 +15,10 @@ function view(transaction: WagerTransaction) {
         providerId: transaction.providerId, externalTransactionId: transaction.externalTransactionId,
         money: transaction.money.toJSON() };
 }
-@Controller('wagering/transactions')
+@Controller()
 export class WagerController {
     constructor(@Inject(MikroORM) private readonly orm: MikroORM) {}
-    @Post()
+    @Post('wagering/transactions')
     submit(@Body() body: unknown, @Headers('idempotency-key') key: unknown,
         @Res({ passthrough: true }) response: { status(code: number): unknown }) {
         const input = object(body);
@@ -49,12 +49,12 @@ export class WagerController {
             }
         });
     }
-    @Get('provider/:providerId/external/:externalTransactionId')
+    @Get(['wagering/transactions/provider/:providerId/external/:externalTransactionId', 'providers/:providerId/wagering/transactions/:externalTransactionId'])
     byExternal(@Param('providerId') providerId: string, @Param('externalTransactionId') external: string) {
         identity(providerId); identity(external);
         return httpOperation(async () => view(found(await new MikroOrmWagerTransactionRepository(this.orm.em.fork()).findByProviderAndExternalTransactionId(providerId, external))));
     }
-    @Get(':id')
+    @Get('wagering/transactions/:id')
     get(@Param('id') id: string) {
         uuid(id);
         return httpOperation(async () => view(found(await new MikroOrmWagerTransactionRepository(this.orm.em.fork()).findById(id))));
