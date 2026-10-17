@@ -152,7 +152,40 @@ obrigatória. Os testes de concorrência entre instâncias ORM rodam no mesmo pr
 não simulam kill real do processo durante uma reversão.
 
 A janela de retry é curta para demonstração; operação real deve ajustar política
-e monitorar REFERENCE_NOT_FOUND. Nenhuma API HTTP completa, abertura com ledger
+e monitorar REFERENCE_NOT_FOUND. Na etapa anterior, nenhuma API HTTP completa, abertura com ledger
 OPENING, reconciliação pública ou WalletBalanceChanged foi implementada nesta etapa.
 O publisher e o consumidor SQS existentes continuam acionados pelos seus serviços;
 apenas o worker de referências foi conectado ao ciclo de vida Nest nesta alteração.
+
+## Entrega HTTP mínima
+
+POST /wallets grava Wallet.open (version 1), OPENING processada, exatamente um
+CREDIT de zero ao saldo inicial e WagerTransactionProcessed na mesma transação.
+O saldo inicial deve ser positivo. Não chama wallet.credit após Wallet.open.
+Nenhuma migration foi necessária; unicidade player/moeda usa a constraint existente.
+
+A entrada HTTP chama acceptWagerInTransaction e processWagerInTransaction, os
+mesmos componentes usados pelo handler SQS, na mesma transação com Outbox.
+Não cria Inbox fictícia para HTTP. Conflitos otimistas reiniciam toda a transação,
+com novo EntityManager, até cinco tentativas. BET/WIN/LOSS emitem no adapter HTTP;
+reversões continuam emitindo no processador existente. Replay retorna o saldo
+observado persistido na decisão, mesmo que a wallet tenha mudado depois.
+
+Ledger usa keyset (created_at, id), preserva microssegundos do PostgreSQL no cursor
+base64url e vincula o cursor à wallet. O cursor é opaco, não assinado. Cada página
+é uma consulta independente: não representa snapshot congelado entre requests;
+novos commits com timestamps anteriores ao cursor podem exigir reiniciar a leitura.
+Reconciliação usa uma única instrução SQL e um snapshot consistente para saldo e
+soma CREDIT menos DEBIT. Difference = stored minus calculated, usando Decimal.
+Não há autocorreção. Consultas por UUID inexistente retornam 404; formato inválido 400.
+
+Readiness consulta PostgreSQL e ListQueues no SQS, sem criar recursos. Confirma
+alcançabilidade, não configuração de filas/DLQ nem execução do consumer/publisher.
+PendingReferenceWorker permanece automático; consumer e publisher ainda requerem
+acionamento explícito e são exercitados pelos testes de integração.
+
+Autenticação foi omitida por timebox. O ponto de integração é o boundary HTTP dos
+controllers: adicionar guard Nest validando assinatura JWKS, issuer, audience e
+expiração de access tokens OIDC de IdP externo (Keycloak/Zitadel), vinculando o
+providerId ao principal e autorizando acesso às wallets. Health fica público;
+SQS continua canal interno, protegido por IAM. Não há guard nem IdP implementado.

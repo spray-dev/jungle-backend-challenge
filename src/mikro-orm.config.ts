@@ -10,11 +10,11 @@ import {
 } from "./persistence/entities/outbox-message.entity.js";
 
 export default defineConfig({
-    host: "localhost",
-    port: 5433,
-    user: "wagering",
-    password: "wagering_dev",
-    dbName: "wagering",
+    host: process.env.WAGER_DB_HOST ?? "localhost",
+    port: Number(process.env.WAGER_DB_PORT ?? "5433"),
+    user: process.env.WAGER_DB_USER ?? "wagering",
+    password: process.env.WAGER_DB_PASSWORD ?? "wagering_dev",
+    dbName: process.env.WAGER_DB_NAME ?? "wagering",
 
     entities: [
         WalletEntity,

@@ -1,3 +1,5 @@
+import { WalletController } from './http/wallet.controller.js';
+import { WagerController } from './http/wager.controller.js';
 import { MikroORM } from "@mikro-orm/postgresql";
 import { RetryPendingReferenceService } from "./application/services/retry-pending-reference.service.js";
 import { PendingReferenceWorker } from "./infrastructure/messaging/pending-reference.worker.js";
@@ -13,7 +15,7 @@ import mikroOrmConfig from "./mikro-orm.config.js";
   ],
   providers: [{ provide: PendingReferenceWorker, inject: [MikroORM],
     useFactory: (orm: MikroORM) => new PendingReferenceWorker(new RetryPendingReferenceService(orm.em)) }],
-  controllers: [HealthController],
+  controllers: [HealthController, WalletController, WagerController],
 })
 
 export class AppModule {}
