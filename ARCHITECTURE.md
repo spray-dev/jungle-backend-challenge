@@ -93,3 +93,21 @@ Os testes concorrentes usam conexões no mesmo processo: não comprovam três pr
 nem crash/ack. As fixtures reconciliam saldo inicial menos débitos; abertura com
 ledger próprio continua separada. ApplyWalletDebitService permanece um exercício
 de atomicidade e não deve processar BET em produção, pois não coordena seu status.
+
+### Canonical wager payload hashing
+
+New wagers use SHA-256 (UTF-8, lowercase hex) of `canonicalJson` over an explicit
+business allowlist: providerId, externalTransactionId, walletId, playerId,
+roundId, gameId, kind, normalized money (amount/currency), and
+referenceExternalTransactionId when supplied. Absent references are omitted.
+All object keys are sorted lexically (UTF-16), recursively, including objects
+inside arrays; array order is preserved. JSON primitives use JSON.stringify
+escaping/formatting. Integer-like keys are also emitted in lexical order.
+The helper accepts JSON values and rejects non-finite numbers.
+Idempotency keys, headers and transport metadata are excluded. Inbox transport
+hashing is separate and unchanged.
+
+Existing hashes retain read compatibility with the previous fixed-field-order
+algorithm, only when the stored reference also matches the incoming reference.
+New writes always use the canonical algorithm; no hash backfill is needed.
+WIN references are preserved without resolving or validating their target.

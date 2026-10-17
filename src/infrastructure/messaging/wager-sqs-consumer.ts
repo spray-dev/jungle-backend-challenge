@@ -37,6 +37,7 @@ export interface WagerTransactionRequestedMessage {
         gameId: string;
 
         kind: "BET" | "WIN" | "LOSS";
+        referenceExternalTransactionId?: string;
 
         money: {
             amount: string;
@@ -134,6 +135,7 @@ export class WagerSqsConsumer {
 
                 wager: {
                     kind: envelope.data.kind,
+                    referenceExternalTransactionId: envelope.data.referenceExternalTransactionId,
                     providerId:
                         envelope.data.providerId,
 
@@ -358,6 +360,11 @@ export class WagerSqsConsumer {
             throw new InvalidWagerMessageError(
                 "Only BET/WIN/LOSS are currently supported",
             );
+        }
+
+        if (data.referenceExternalTransactionId !== undefined &&
+            typeof data.referenceExternalTransactionId !== "string") {
+            throw new InvalidWagerMessageError("Invalid referenceExternalTransactionId");
         }
 
         if (

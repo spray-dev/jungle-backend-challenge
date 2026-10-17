@@ -1,3 +1,4 @@
+import { canonicalJson } from "../../shared/canonical-json.js";
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { MikroORM } from "@mikro-orm/postgresql";
@@ -111,12 +112,12 @@ for (const kind of ["WIN", "LOSS"] as const) {
     });
 }
 
-it("kind participates in canonical hash and BET keeps its original hash", async () => {
+it("kind participates in canonical hash and BET uses sorted business fields", async () => {
     const command = await input("BET");
     const service = new AcceptWagerService(orm.em.fork());
     const original = await service.execute(command);
     const { providerId, externalTransactionId, walletId, playerId, roundId, gameId, kind, money } = command;
-    expect(original.payloadHash).toBe(createHash("sha256").update(JSON.stringify({ providerId, externalTransactionId, walletId, playerId, roundId, gameId, kind, money })).digest("hex"));
+    expect(original.payloadHash).toBe(createHash("sha256").update(canonicalJson({ providerId, externalTransactionId, walletId, playerId, roundId, gameId, kind, money })).digest("hex"));
     for (const changedKind of ["WIN", "LOSS"] as const) {
         await expect(service.execute({ ...command, kind: changedKind })).rejects.toBeInstanceOf(IdempotencyConflictError);
     }
@@ -167,3 +168,44 @@ for (const kind of [Kind.Opening, Kind.Refund, Kind.Rollback]) {
         await expect(new AcceptWagerService(orm.em.fork()).execute({ ...command, kind: kind as AcceptWagerCommand["kind"] })).rejects.toThrow("Only BET/WIN/LOSS");
     });
 }
+
+it("WIN preserves its optional reference across reconnect and conflicts on a changed or omitted reference", async () => {
+    const command = { ...await input("WIN"), referenceExternalTransactionId: "unresolved-bet" };
+    const original = await new AcceptWagerService(orm.em.fork()).execute(command);
+    expect(original.referenceExternalTransactionId).toBe("unresolved-bet");
+    const fresh = await MikroORM.init(orm.config.getAll());
+    try {
+        const service = new AcceptWagerService(fresh.em.fork());
+        const replay = await service.execute({ ...command, money: { currency: "brl", amount: "0200.00" } });
+        expect(replay.id).toBe(original.id);
+        expect(replay.referenceExternalTransactionId).toBe("unresolved-bet");
+        for (const referenceExternalTransactionId of ["another-bet", undefined]) {
+            await expect(service.execute({ ...command, referenceExternalTransactionId })).rejects.toBeInstanceOf(IdempotencyConflictError);
+        }
+    } finally { await fresh.close(); }
+    expect((await rows("wager_transactions", "id", original.id))[0]?.reference_external_transaction_id).toBe("unresolved-bet");
+});
+
+for (const kind of ["BET", "WIN", "LOSS"] as const) {
+    it(`${kind}: replays legacy hashes while rejecting changed business data and new references`, async () => {
+        const command = await input(kind);
+        const service = new AcceptWagerService(orm.em.fork());
+        const original = await service.execute(command);
+        const { providerId, externalTransactionId, walletId, playerId, roundId, gameId, money } = command;
+        const legacyHash = createHash("sha256").update(JSON.stringify({ providerId, externalTransactionId, walletId, playerId, roundId, gameId, kind, money })).digest("hex");
+        await orm.em.getConnection().execute("update wager_transactions set payload_hash = ? where id = ?", [legacyHash, original.id]);
+        expect((await service.execute(command)).id).toBe(original.id);
+        for (const overrides of [{ roundId: "different" }, { referenceExternalTransactionId: "new-reference" }]) {
+            await expect(service.execute({ ...command, ...overrides })).rejects.toBeInstanceOf(IdempotencyConflictError);
+        }
+    });
+}
+
+it("business hashing ignores transport metadata and idempotency key", async () => {
+    const command = await input("WIN");
+    const service = new AcceptWagerService(orm.em.fork());
+    const original = await service.execute({ ...command, messageId: "first" } as AcceptWagerCommand);
+    expect((await service.execute({ ...command, messageId: "second" } as AcceptWagerCommand)).payloadHash).toBe(original.payloadHash);
+    const { idempotencyKey, ...business } = command;
+    expect(original.payloadHash).toBe(createHash("sha256").update(canonicalJson(business)).digest("hex"));
+});

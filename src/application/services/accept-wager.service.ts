@@ -1,3 +1,4 @@
+import { canonicalJson } from "../../shared/canonical-json.js";
 import { createHash } from "node:crypto";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { Money, type MoneyProps } from "../../domain/money.js";
@@ -16,6 +17,7 @@ export interface AcceptWagerCommand {
     roundId: string;
     gameId: string;
     money: MoneyProps;
+    referenceExternalTransactionId?: string;
 }
 
 export interface AcceptWagerResult {
@@ -74,36 +76,23 @@ export async function acceptWagerInTransaction(
         );
     }
 
-    const payloadHash =
-        createHash("sha256")
-            .update(
-                JSON.stringify({
-                    providerId:
-                        command.providerId,
-
-                    externalTransactionId:
-                        command.externalTransactionId,
-
-                    walletId:
-                        command.walletId,
-
-                    playerId:
-                        command.playerId,
-
-                    roundId:
-                        command.roundId,
-
-                    gameId:
-                        command.gameId,
-
-                    kind:
-                        command.kind as WagerTransactionKind,
-
-                    money:
-                        money.toJSON(),
-                }),
-            )
-            .digest("hex");
+    // Explicit business allowlist; headers and transport metadata never enter the hash.
+    const businessPayload = {
+        providerId: command.providerId,
+        externalTransactionId: command.externalTransactionId,
+        walletId: command.walletId,
+        playerId: command.playerId,
+        roundId: command.roundId,
+        gameId: command.gameId,
+        kind: command.kind,
+        money: money.toJSON(),
+    };
+    const payloadHash = createHash("sha256").update(canonicalJson({
+        ...businessPayload,
+        ...(command.referenceExternalTransactionId === undefined ? {} : {
+            referenceExternalTransactionId: command.referenceExternalTransactionId,
+        }),
+    })).digest("hex");
 
     const candidate =
         WagerTransaction.create({
@@ -157,7 +146,11 @@ export async function acceptWagerInTransaction(
         !byKey ||
         !byExternal ||
         byKey.id !== byExternal.id ||
-        !byKey.matchesPayload(payloadHash)
+        !(byKey.matchesPayload(payloadHash) || (
+            // Read compatibility with the pre-canonical algorithm; never write old hashes.
+            (byKey.referenceExternalTransactionId ?? undefined) === command.referenceExternalTransactionId &&
+            byKey.matchesPayload(createHash("sha256").update(JSON.stringify(businessPayload)).digest("hex"))
+        ))
     ) {
         throw new IdempotencyConflictError();
     }

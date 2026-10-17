@@ -810,3 +810,49 @@ for (const kind of ["WIN", "LOSS"] as const) {
         expect(events[0]?.payload.data.kind).toBe(kind);
     });
 }
+
+it("SQS preserves WIN references, replays with new metadata and rejects divergent references", async () => {
+    const id = crypto.randomUUID();
+    const queue = await client.send(new CreateQueueCommand({ QueueName: `reference-${id}.fifo`, Attributes: { FifoQueue: "true" } }));
+    const url = queue.QueueUrl!;
+    try {
+        await new MikroOrmWalletRepository(orm.em.fork()).create(Wallet.open({
+            id, playerId: id, initialBalance: Money.from({ amount: "100.00", currency: "BRL" }),
+        }));
+        const consumer = new WagerSqsConsumer(client, url, orm.em.fork());
+        for (const reference of ["missing-bet", "missing-bet", "different-bet"]) {
+            const messageId = crypto.randomUUID();
+            await client.send(new SendMessageCommand({
+                QueueUrl: url, MessageGroupId: id, MessageDeduplicationId: messageId,
+                MessageBody: JSON.stringify({ messageId, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(),
+                    data: { providerId: "reference-test", externalTransactionId: id, idempotencyKey: id,
+                        playerId: id, walletId: id, roundId: "round", gameId: "game", kind: "WIN",
+                        referenceExternalTransactionId: reference, money: { amount: "20.00", currency: "BRL" } } }),
+            }));
+            expect(await consumer.pollOnce()).toBe(reference === "different-bet" ? "PERMANENT_FAILURE" : "ACKED");
+        }
+        const wagers = await orm.em.getConnection().execute("select * from wager_transactions where wallet_id = ?", [id]);
+        expect(wagers).toHaveLength(1);
+        expect(wagers[0]).toMatchObject({ reference_external_transaction_id: "missing-bet", status: "PROCESSED" });
+        const wallet = await new MikroOrmWalletRepository(orm.em.fork()).findById(id);
+        expect(wallet?.balance.toJSON().amount).toBe("120.00");
+        expect(wallet?.version).toBe(2);
+        expect(await orm.em.getConnection().execute("select id from wallet_ledger_entries where wallet_id = ?", [id])).toHaveLength(1);
+    } finally { await client.send(new DeleteQueueCommand({ QueueUrl: url })); }
+});
+
+it("SQS rejects a non-string WIN reference before admission", async () => {
+    const id = crypto.randomUUID();
+    const queue = await client.send(new CreateQueueCommand({ QueueName: `invalid-reference-${id}.fifo`, Attributes: { FifoQueue: "true" } }));
+    const url = queue.QueueUrl!;
+    try {
+        await client.send(new SendMessageCommand({ QueueUrl: url, MessageGroupId: id, MessageDeduplicationId: id,
+            MessageBody: JSON.stringify({ messageId: id, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(),
+                data: { providerId: "reference-test", externalTransactionId: id, idempotencyKey: id,
+                    playerId: id, walletId: id, roundId: "round", gameId: "game", kind: "WIN",
+                    referenceExternalTransactionId: 123, money: { amount: "20.00", currency: "BRL" } } }),
+        }));
+        expect(await new WagerSqsConsumer(client, url, orm.em.fork()).pollOnce()).toBe("PERMANENT_FAILURE");
+        expect(await orm.em.getConnection().execute("select id from wager_transactions where external_transaction_id = ?", [id])).toHaveLength(0);
+    } finally { await client.send(new DeleteQueueCommand({ QueueUrl: url })); }
+});
