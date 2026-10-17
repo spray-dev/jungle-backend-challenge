@@ -39,6 +39,16 @@ import {
     WagerSqsConsumer,
 } from "./wager-sqs-consumer.js";
 
+import { createHash } from "node:crypto";
+
+import {
+    ChangeMessageVisibilityCommand,
+} from "@aws-sdk/client-sqs";
+
+import {
+    HandleWagerMessageService,
+} from "../../application/services/handle-wager-message.service.js";
+
 let orm: MikroORM;
 let client: SQSClient;
 
@@ -387,4 +397,381 @@ it("processes a real SQS wager and acknowledges only after commit", async () => 
 
     expect(outbox)
         .toHaveLength(1);
+});
+
+it("survives redelivery after commit before ack without duplicating financial effects", async () => {
+    const walletId =
+        crypto.randomUUID();
+
+    const playerId =
+        crypto.randomUUID();
+
+    await new MikroOrmWalletRepository(
+        orm.em.fork(),
+    ).create(
+        Wallet.open({
+            id: walletId,
+            playerId,
+
+            initialBalance:
+                Money.from({
+                    amount: "100.00",
+                    currency: "BRL",
+                }),
+        }),
+    );
+
+    const messageId =
+        crypto.randomUUID();
+
+    const externalTransactionId =
+        crypto.randomUUID();
+
+    const body =
+        JSON.stringify({
+            messageId,
+
+            type:
+                "WagerTransactionRequested",
+
+            occurredAt:
+                new Date().toISOString(),
+
+            data: {
+                providerId:
+                    "provider-a",
+
+                externalTransactionId,
+
+                idempotencyKey:
+                    `provider-a:${externalTransactionId}`,
+
+                playerId,
+                walletId,
+
+                roundId:
+                    "round-redelivery",
+
+                gameId:
+                    "game-redelivery",
+
+                kind:
+                    "BET",
+
+                money: {
+                    amount: "20.00",
+                    currency: "BRL",
+                },
+            },
+        });
+
+    await client.send(
+        new SendMessageCommand({
+            QueueUrl:
+                queueUrl,
+
+            MessageBody:
+                body,
+
+            MessageGroupId:
+                walletId,
+
+            MessageDeduplicationId:
+                messageId,
+        }),
+    );
+
+    /*
+     * Worker A recebe a mensagem...
+     */
+    const firstDelivery =
+        await client.send(
+            new ReceiveMessageCommand({
+                QueueUrl:
+                    queueUrl,
+
+                MaxNumberOfMessages:
+                    1,
+
+                WaitTimeSeconds:
+                    1,
+            }),
+        );
+
+    const received =
+        firstDelivery.Messages?.[0];
+
+    expect(received)
+        .toBeDefined();
+
+    /*
+     * ...processa e COMMITA no PostgreSQL...
+     */
+    const payloadHash =
+        createHash("sha256")
+            .update(body)
+            .digest("hex");
+
+    await new HandleWagerMessageService(
+        orm.em.fork(),
+    ).execute({
+        consumerName:
+            "wager-transactions-consumer",
+
+        messageId,
+
+        payloadHash,
+
+        wager: {
+            providerId:
+                "provider-a",
+
+            externalTransactionId,
+
+            idempotencyKey:
+                `provider-a:${externalTransactionId}`,
+
+            playerId,
+            walletId,
+
+            roundId:
+                "round-redelivery",
+
+            gameId:
+                "game-redelivery",
+
+            money: {
+                amount: "20.00",
+                currency: "BRL",
+            },
+        },
+    });
+
+    /*
+     * ...mas "morre" antes de DeleteMessage.
+     *
+     * VisibilityTimeout = 0 simula a mensagem
+     * voltando imediatamente para outro worker.
+     */
+    await client.send(
+        new ChangeMessageVisibilityCommand({
+            QueueUrl:
+                queueUrl,
+
+            ReceiptHandle:
+                received!.ReceiptHandle!,
+
+            VisibilityTimeout:
+                0,
+        }),
+    );
+
+    /*
+     * Worker B recebe a mesma mensagem.
+     */
+    const secondResult =
+        await new WagerSqsConsumer(
+            client,
+            queueUrl,
+            orm.em.fork(),
+        ).pollOnce();
+
+    expect(secondResult)
+        .toBe("ACKED");
+
+    /*
+     * O importante:
+     * nada financeiro pode ter duplicado.
+     */
+    const walletRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select balance, version
+                    from wallets
+                    where id = ?
+                `,
+                [
+                    walletId,
+                ],
+            );
+
+    expect(
+        walletRows[0]?.balance,
+    ).toBe("80.00");
+
+    expect(
+        walletRows[0]?.version,
+    ).toBe(2);
+
+    const ledgerRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from wallet_ledger_entries
+                    where wallet_id = ?
+                `,
+                [
+                    walletId,
+                ],
+            );
+
+    expect(ledgerRows)
+        .toHaveLength(1);
+
+    const wagerRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from wager_transactions
+                    where provider_id = ?
+                      and external_transaction_id = ?
+                `,
+                [
+                    "provider-a",
+                    externalTransactionId,
+                ],
+            );
+
+    expect(wagerRows)
+        .toHaveLength(1);
+
+    const inboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select *
+                    from inbox_messages
+                    where consumer_name = ?
+                      and message_id = ?
+                `,
+                [
+                    "wager-transactions-consumer",
+                    messageId,
+                ],
+            );
+
+    expect(inboxRows)
+        .toHaveLength(1);
+
+    const outboxRows =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from outbox_messages
+                    where payload
+                        -> 'data'
+                        ->> 'externalTransactionId'
+                        = ?
+                `,
+                [
+                    externalTransactionId,
+                ],
+            );
+
+    expect(outboxRows)
+        .toHaveLength(1);
+});
+
+it("moves a permanently invalid message to the DLQ after repeated deliveries", async () => {
+    const messageId =
+        crypto.randomUUID();
+
+    const body =
+        JSON.stringify({
+            messageId,
+
+            type:
+                "SomethingUnsupported",
+
+            occurredAt:
+                new Date().toISOString(),
+
+            data: {},
+        });
+
+    await client.send(
+        new SendMessageCommand({
+            QueueUrl:
+                queueUrl,
+
+            MessageBody:
+                body,
+
+            MessageGroupId:
+                "invalid-message",
+
+            MessageDeduplicationId:
+                messageId,
+        }),
+    );
+
+    const consumer =
+        new WagerSqsConsumer(
+            client,
+            queueUrl,
+            orm.em.fork(),
+        );
+
+    /*
+     * RedrivePolicy da fila:
+     * maxReceiveCount = 5.
+     *
+     * Fazemos algumas polls extras porque
+     * a mudança para a DLQ é responsabilidade
+     * do broker.
+     */
+    for (
+        let attempt = 0;
+        attempt < 7;
+        attempt++
+    ) {
+        await consumer.pollOnce();
+    }
+
+    let receivedFromDlq: any;
+
+    for (
+        let attempt = 0;
+        attempt < 5;
+        attempt++
+    ) {
+        const response =
+            await client.send(
+                new ReceiveMessageCommand({
+                    QueueUrl:
+                        dlqUrl,
+
+                    MaxNumberOfMessages:
+                        1,
+
+                    WaitTimeSeconds:
+                        1,
+                }),
+            );
+
+        if (
+            response.Messages?.[0]
+        ) {
+            receivedFromDlq =
+                response.Messages[0];
+
+            break;
+        }
+    }
+
+    expect(receivedFromDlq)
+        .toBeDefined();
+
+    expect(
+        receivedFromDlq.Body,
+    ).toBe(body);
 });
