@@ -21,5 +21,16 @@ services:
       timeout: 5s
       retries: 10
 
+  localstack:
+    image: ministackorg/ministack:latest
+    container_name: wagering-ministack
+    restart: unless-stopped
+
+    environment:
+      MINISTACK_REGION: us-east-1
+
+    ports:
+      - "4566:4566"
+
 volumes:
   postgres_data:

@@ -96,4 +96,32 @@ export class OutboxMessage {
     isPublished(): boolean {
         return this._publishedAt !== undefined;
     }
+
+    markPublished(at: Date): void {
+    if (this.isPublished()) {
+        throw new Error(
+            "Outbox message is already published",
+        );
+    }
+
+        this._publishedAt =
+            new Date(at.getTime());
+    }
+
+    scheduleRetry(
+        nextAttemptAt: Date,
+    ): void {
+        if (this.isPublished()) {
+            throw new Error(
+                "Cannot retry a published outbox message",
+            );
+        }
+
+        this._attempts += 1;
+
+        this._nextAttemptAt =
+            new Date(
+                nextAttemptAt.getTime(),
+            );
+    }
 }

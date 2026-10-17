@@ -10,4 +10,13 @@ export interface OutboxMessageRepository {
     findById(
         id: string,
     ): Promise<OutboxMessage | null>;
+
+    claimPending(
+        now: Date,
+        limit: number,
+    ): Promise<OutboxMessage[]>;
+
+    update(
+        message: OutboxMessage,
+    ): Promise<void>;
 }

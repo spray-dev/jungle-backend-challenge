@@ -1,0 +1,390 @@
+import {
+    afterAll,
+    beforeAll,
+    expect,
+    it,
+} from "bun:test";
+
+import {
+    CreateQueueCommand,
+    DeleteQueueCommand,
+    GetQueueAttributesCommand,
+    ReceiveMessageCommand,
+    SendMessageCommand,
+    SQSClient,
+} from "@aws-sdk/client-sqs";
+
+import {
+    MikroORM,
+} from "@mikro-orm/postgresql";
+
+import {
+    createTestOrm,
+    closeTestOrm,
+} from "../../testing/integration-database.js";
+
+import {
+    Money,
+} from "../../domain/money.js";
+
+import {
+    Wallet,
+} from "../../domain/wallet.js";
+
+import {
+    MikroOrmWalletRepository,
+} from "../../persistence/repositories/mikro-orm-wallet.repository.js";
+
+import {
+    WagerSqsConsumer,
+} from "./wager-sqs-consumer.js";
+
+let orm: MikroORM;
+let client: SQSClient;
+
+let queueUrl: string;
+let dlqUrl: string;
+
+beforeAll(async () => {
+    orm =
+        await createTestOrm();
+
+    client =
+        new SQSClient({
+            region:
+                "us-east-1",
+
+            endpoint:
+                "http://localhost:4566",
+
+            credentials: {
+                accessKeyId:
+                    "test",
+
+                secretAccessKey:
+                    "test",
+            },
+        });
+
+    const suffix =
+        crypto.randomUUID()
+            .replaceAll("-", "");
+
+    const dlq =
+        await client.send(
+            new CreateQueueCommand({
+                QueueName:
+                    `consumer-dlq-${suffix}.fifo`,
+
+                Attributes: {
+                    FifoQueue:
+                        "true",
+
+                    ContentBasedDeduplication:
+                        "false",
+                },
+            }),
+        );
+
+    dlqUrl =
+        dlq.QueueUrl!;
+
+    const attrs =
+        await client.send(
+            new GetQueueAttributesCommand({
+                QueueUrl:
+                    dlqUrl,
+
+                AttributeNames: [
+                    "QueueArn",
+                ],
+            }),
+        );
+
+    const queue =
+        await client.send(
+            new CreateQueueCommand({
+                QueueName:
+                    `consumer-${suffix}.fifo`,
+
+                Attributes: {
+                    FifoQueue:
+                        "true",
+
+                    ContentBasedDeduplication:
+                        "false",
+
+                    VisibilityTimeout:
+                        "1",
+
+                    RedrivePolicy:
+                        JSON.stringify({
+                            deadLetterTargetArn:
+                                attrs.Attributes!
+                                    .QueueArn!,
+
+                            maxReceiveCount:
+                                5,
+                        }),
+                },
+            }),
+        );
+
+    queueUrl =
+        queue.QueueUrl!;
+}, 30000);
+
+afterAll(async () => {
+    if (queueUrl) {
+        await client.send(
+            new DeleteQueueCommand({
+                QueueUrl:
+                    queueUrl,
+            }),
+        );
+    }
+
+    if (dlqUrl) {
+        await client.send(
+            new DeleteQueueCommand({
+                QueueUrl:
+                    dlqUrl,
+            }),
+        );
+    }
+
+    client.destroy();
+
+    await closeTestOrm(
+        orm,
+    );
+});
+
+it("processes a real SQS wager and acknowledges only after commit", async () => {
+    const walletId =
+        crypto.randomUUID();
+
+    const playerId =
+        crypto.randomUUID();
+
+    await new MikroOrmWalletRepository(
+        orm.em.fork(),
+    ).create(
+        Wallet.open({
+            id:
+                walletId,
+
+            playerId,
+
+            initialBalance:
+                Money.from({
+                    amount:
+                        "100.00",
+
+                    currency:
+                        "BRL",
+                }),
+        }),
+    );
+
+    const messageId =
+        crypto.randomUUID();
+
+    const externalTransactionId =
+        crypto.randomUUID();
+
+    const body =
+        JSON.stringify({
+            messageId,
+
+            type:
+                "WagerTransactionRequested",
+
+            occurredAt:
+                new Date().toISOString(),
+
+            data: {
+                providerId:
+                    "provider-a",
+
+                externalTransactionId,
+
+                idempotencyKey:
+                    `provider-a:${externalTransactionId}`,
+
+                playerId,
+                walletId,
+
+                roundId:
+                    "round-1",
+
+                gameId:
+                    "game-1",
+
+                kind:
+                    "BET",
+
+                money: {
+                    amount:
+                        "20.00",
+
+                    currency:
+                        "BRL",
+                },
+            },
+        });
+
+    await client.send(
+        new SendMessageCommand({
+            QueueUrl:
+                queueUrl,
+
+            MessageBody:
+                body,
+
+            MessageGroupId:
+                walletId,
+
+            MessageDeduplicationId:
+                messageId,
+        }),
+    );
+
+    const result =
+        await new WagerSqsConsumer(
+            client,
+            queueUrl,
+            orm.em.fork(),
+        ).pollOnce();
+
+    expect(result)
+        .toBe("ACKED");
+
+    /*
+     * Se o ACK aconteceu,
+     * a mensagem não deve mais estar na fila.
+     */
+    const remaining =
+        await client.send(
+            new ReceiveMessageCommand({
+                QueueUrl:
+                    queueUrl,
+
+                MaxNumberOfMessages:
+                    1,
+
+                WaitTimeSeconds:
+                    1,
+            }),
+        );
+
+    expect(
+        remaining.Messages ??
+        [],
+    ).toHaveLength(0);
+
+    const wallets =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select balance, version
+                    from wallets
+                    where id = ?
+                `,
+                [
+                    walletId,
+                ],
+            );
+
+    expect(
+        wallets[0]?.balance,
+    ).toBe("80.00");
+
+    expect(
+        wallets[0]?.version,
+    ).toBe(2);
+
+    const wagers =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select status
+                    from wager_transactions
+                    where provider_id = ?
+                      and external_transaction_id = ?
+                `,
+                [
+                    "provider-a",
+                    externalTransactionId,
+                ],
+            );
+
+    expect(wagers)
+        .toHaveLength(1);
+
+    expect(
+        wagers[0]?.status,
+    ).toBe("PROCESSED");
+
+    const ledger =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from wallet_ledger_entries
+                    where wallet_id = ?
+                `,
+                [
+                    walletId,
+                ],
+            );
+
+    expect(ledger)
+        .toHaveLength(1);
+
+    const inbox =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select processed_at
+                    from inbox_messages
+                    where consumer_name = ?
+                      and message_id = ?
+                `,
+                [
+                    "wager-transactions-consumer",
+                    messageId,
+                ],
+            );
+
+    expect(inbox)
+        .toHaveLength(1);
+
+    expect(
+        inbox[0]?.processed_at,
+    ).not.toBeNull();
+
+    const outbox =
+        await orm.em
+            .getConnection()
+            .execute(
+                `
+                    select id
+                    from outbox_messages
+                    where payload
+                        -> 'data'
+                        ->> 'externalTransactionId'
+                        = ?
+                `,
+                [
+                    externalTransactionId,
+                ],
+            );
+
+    expect(outbox)
+        .toHaveLength(1);
+});

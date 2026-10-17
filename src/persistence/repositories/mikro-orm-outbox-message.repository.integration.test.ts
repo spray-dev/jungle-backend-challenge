@@ -211,3 +211,108 @@ it("participates in an outer transaction and rolls back with it", async () => {
     expect(stored)
         .toBeNull();
 });
+
+it("allows concurrent workers to claim different outbox messages", async () => {
+    const first =
+        createOutboxMessage();
+
+    const second =
+        createOutboxMessage();
+
+    const repository =
+        new MikroOrmOutboxMessageRepository(
+            orm.em.fork(),
+        );
+
+    await repository.insert(
+        first,
+    );
+
+    await repository.insert(
+        second,
+    );
+
+    const now =
+        new Date();
+
+    let releaseFirst:
+        (() => void) | undefined;
+
+    const firstHasClaimed =
+        new Promise<void>(
+            resolve => {
+                releaseFirst =
+                    resolve;
+            },
+        );
+
+    let confirmFirstClaim:
+        (() => void) | undefined;
+
+    const firstClaimReady =
+        new Promise<void>(
+            resolve => {
+                confirmFirstClaim =
+                    resolve;
+            },
+        );
+
+    const workerA =
+        orm.em.fork().transactional(
+            async tx => {
+                const repo =
+                    new MikroOrmOutboxMessageRepository(
+                        tx,
+                    );
+
+                const claimed =
+                    await repo.claimPending(
+                        now,
+                        1,
+                    );
+
+                expect(claimed)
+                    .toHaveLength(1);
+
+                confirmFirstClaim?.();
+
+                await firstHasClaimed;
+
+                return claimed[0]!.id;
+            },
+        );
+
+    await firstClaimReady;
+
+    const workerB =
+        orm.em.fork().transactional(
+            async tx => {
+                const repo =
+                    new MikroOrmOutboxMessageRepository(
+                        tx,
+                    );
+
+                const claimed =
+                    await repo.claimPending(
+                        now,
+                        1,
+                    );
+
+                expect(claimed)
+                    .toHaveLength(1);
+
+                return claimed[0]!.id;
+            },
+        );
+
+    const workerBId =
+        await workerB;
+
+    releaseFirst?.();
+
+    const workerAId =
+        await workerA;
+
+    expect(workerAId)
+        .not.toBe(workerBId);
+});
