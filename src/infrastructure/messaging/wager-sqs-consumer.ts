@@ -13,7 +13,7 @@ import {
 
 import {
     IdempotencyConflictError,
-} from "../../application/services/accept-bet.service.js";
+} from "../../application/services/accept-wager.service.js";
 
 import {
     HandleWagerMessageService,
@@ -36,7 +36,7 @@ export interface WagerTransactionRequestedMessage {
         roundId: string;
         gameId: string;
 
-        kind: "BET";
+        kind: "BET" | "WIN" | "LOSS";
 
         money: {
             amount: string;
@@ -112,7 +112,7 @@ export class WagerSqsConsumer {
              * usado pela Inbox.
              *
              * É separado do payloadHash financeiro
-             * calculado por AcceptBet.
+             * calculado por AcceptWager.
              */
             const payloadHash =
                 createHash("sha256")
@@ -133,6 +133,7 @@ export class WagerSqsConsumer {
                 payloadHash,
 
                 wager: {
+                    kind: envelope.data.kind,
                     providerId:
                         envelope.data.providerId,
 
@@ -353,14 +354,9 @@ export class WagerSqsConsumer {
             }
         }
 
-        /*
-         * Nosso use case atual ainda processa BET.
-         * WIN/LOSS/REFUND/ROLLBACK entram no
-         * próximo bloco do domínio.
-         */
-        if (data.kind !== "BET") {
+        if (data.kind !== "BET" && data.kind !== "WIN" && data.kind !== "LOSS") {
             throw new InvalidWagerMessageError(
-                "Only BET is currently supported",
+                "Only BET/WIN/LOSS are currently supported",
             );
         }
 

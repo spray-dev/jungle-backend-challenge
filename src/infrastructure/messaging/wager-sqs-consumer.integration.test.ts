@@ -775,3 +775,38 @@ it("moves a permanently invalid message to the DLQ after repeated deliveries", a
         receivedFromDlq.Body,
     ).toBe(body);
 });
+for (const kind of ["WIN", "LOSS"] as const) {
+    it(`processes ${kind} through real SQS and deduplicates a new delivery identity`, async () => {
+        const walletId = crypto.randomUUID();
+        await new MikroOrmWalletRepository(orm.em.fork()).create(Wallet.open({
+            id: walletId, playerId: walletId,
+            initialBalance: Money.from({ amount: "100.00", currency: "BRL" }),
+        }));
+        const externalTransactionId = crypto.randomUUID();
+        for (let delivery = 0; delivery < 2; delivery++) {
+            const messageId = crypto.randomUUID();
+            await client.send(new SendMessageCommand({
+                QueueUrl: queueUrl, MessageGroupId: walletId, MessageDeduplicationId: messageId,
+                MessageBody: JSON.stringify({
+                    messageId, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(),
+                    data: { providerId: "new-kinds", externalTransactionId, idempotencyKey: externalTransactionId,
+                        playerId: walletId, walletId, roundId: "round", gameId: "game", kind,
+                        money: { amount: "200.00", currency: "BRL" } },
+                }),
+            }));
+            expect(await new WagerSqsConsumer(client, queueUrl, orm.em.fork()).pollOnce()).toBe("ACKED");
+        }
+        const wallet = await new MikroOrmWalletRepository(orm.em.fork()).findById(walletId);
+        expect(wallet?.balance.toJSON().amount).toBe(kind === "WIN" ? "300.00" : "100.00");
+        expect(wallet?.version).toBe(kind === "WIN" ? 2 : 1);
+        const ledger = await orm.em.getConnection().execute("select * from wallet_ledger_entries where wallet_id = ?", [walletId]);
+        expect(ledger).toHaveLength(kind === "WIN" ? 1 : 0);
+        if (kind === "WIN") expect(ledger[0]?.direction).toBe("CREDIT");
+        const wagers = await orm.em.getConnection().execute("select * from wager_transactions where wallet_id = ?", [walletId]);
+        expect(wagers).toHaveLength(1);
+        expect(wagers[0]).toMatchObject({ kind, status: "PROCESSED" });
+        const events = await orm.em.getConnection().execute("select * from outbox_messages where payload->'data'->>'walletId' = ?", [walletId]);
+        expect(events).toHaveLength(1);
+        expect(events[0]?.payload.data.kind).toBe(kind);
+    });
+}

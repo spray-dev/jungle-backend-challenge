@@ -11,13 +11,13 @@ import {
 import { MikroOrmInboxMessageRepository } from "../../persistence/repositories/mikro-orm-inbox-message.repository.js";
 
 import {
-    acceptBetInTransaction,
-    type AcceptBetCommand,
-} from "./accept-bet.service.js";
+    acceptWagerInTransaction,
+    type AcceptWagerCommand,
+} from "./accept-wager.service.js";
 
 import {
-    processBetInTransaction,
-} from "./process-bet.service.js";
+    processWagerInTransaction,
+} from "./process-wager.service.js";
 
 import {
     OutboxMessage,
@@ -95,13 +95,13 @@ export async function handleWagerMessageInTransaction(
 
         if (inbox.isProcessed()) {
             const accepted =
-                await acceptBetInTransaction(
+                await acceptWagerInTransaction(
                     tx,
-                    command.wager,
+                    { ...command.wager, kind: command.wager.kind ?? "BET" },
                 );
 
             const transaction =
-                await processBetInTransaction(
+                await processWagerInTransaction(
                     tx,
                     accepted.transaction.id,
                 );
@@ -116,16 +116,16 @@ export async function handleWagerMessageInTransaction(
     }
 
     const accepted =
-        await acceptBetInTransaction(
+        await acceptWagerInTransaction(
             tx,
-            command.wager,
+            { ...command.wager, kind: command.wager.kind ?? "BET" },
         );
 
     const wasTerminalBeforeProcessing =
         accepted.transaction.isTerminal();
 
     const transaction =
-        await processBetInTransaction(
+        await processWagerInTransaction(
             tx,
             accepted.transaction.id,
         );
@@ -198,7 +198,8 @@ export interface HandleWagerMessageCommand {
      */
     payloadHash: string;
 
-    wager: AcceptBetCommand;
+    // Missing kind remains BET for existing in-process callers; SQS requires it.
+    wager: Omit<AcceptWagerCommand, "kind"> & { kind?: AcceptWagerCommand["kind"] };
 }
 
 export interface HandleWagerMessageResult {
